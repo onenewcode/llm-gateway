@@ -1,0 +1,9 @@
+[workspace]
+
+[package]
+name = "llm-gateway"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+llm-gateway-protocols.path = "crates/protocols"

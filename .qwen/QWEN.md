@@ -18,6 +18,11 @@
    - 包含复杂逻辑或对字段状态有要求的方法
    - 通过方法访问，避免外部代码意外修改字段状态导致异常
 
+## Rust 开发规范
+
+1. **使用 Rust skills** - 开发 Rust 代码时应使用 rust-router 等相关技能
+2. **验证** - 依次执行 `cargo fmt`、`cargo check`、`cargo clippy` 和 `cargo test`，其中 clippy 必须解决所有非 unused 类的警告，除非在 TDD 阶段，否则 test 必须全部通过
+
 ## Git 提交规范
 
 **重要：** 在任何模式下（包括 YOLO），每次提交 git 之前必须由人类 review
