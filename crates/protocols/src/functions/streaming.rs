@@ -1,4 +1,5 @@
-﻿use serde_json::Value as Json;
+﻿use super::ProtocolResult;
+use serde_json::Value as Json;
 
 pub enum SseLine {
     Event(String),
@@ -6,7 +7,7 @@ pub enum SseLine {
 }
 
 pub trait StreamingCollector {
-    fn insert(line: SseLine) -> Option<Vec<SseLine>>;
+    fn insert(line: SseLine) -> ProtocolResult<Option<Vec<SseLine>>>;
 }
 
 pub(crate) struct OpenaiToAnthropic {
@@ -14,7 +15,7 @@ pub(crate) struct OpenaiToAnthropic {
 }
 
 impl StreamingCollector for OpenaiToAnthropic {
-    fn insert(line: SseLine) -> Option<Vec<SseLine>> {
+    fn insert(line: SseLine) -> ProtocolResult<Option<Vec<SseLine>>> {
         todo!()
     }
 }
@@ -24,7 +25,7 @@ pub(crate) struct AnthropicToOpenai {
 }
 
 impl StreamingCollector for AnthropicToOpenai {
-    fn insert(line: SseLine) -> Option<Vec<SseLine>> {
+    fn insert(line: SseLine) -> ProtocolResult<Option<Vec<SseLine>>> {
         todo!()
     }
 }
