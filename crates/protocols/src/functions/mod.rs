@@ -12,6 +12,7 @@ pub enum ProtocolError {
     MissingRequiredField(String),
     ConversionError(String),
     InvalidRequest(String),
+    InvalidStreamEvent(String),
 }
 
 impl fmt::Display for ProtocolError {
@@ -22,6 +23,7 @@ impl fmt::Display for ProtocolError {
             }
             Self::ConversionError(msg) => write!(f, "Conversion error: {msg}"),
             Self::InvalidRequest(msg) => write!(f, "Invalid request: {msg}"),
+            Self::InvalidStreamEvent(msg) => write!(f, "Invalid stream event: {msg}"),
         }
     }
 }
