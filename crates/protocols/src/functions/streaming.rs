@@ -237,10 +237,10 @@ impl OpenaiToAnthropic {
             "type": "message_delta",
             "delta": {
                 "stop_reason": stop_reason,
-                "stop_sequence": null
-            },
-            "usage": {
-                "output_tokens": self.output_tokens.unwrap_or_default()
+                "stop_sequence": null,
+                "usage": {
+                    "output_tokens": self.output_tokens.unwrap_or_default()
+                }
             }
         })
     }
@@ -301,6 +301,13 @@ impl AnthropicToOpenai {
             if let Some(model) = message.get("model").and_then(|v| v.as_str()) {
                 self.model = Some(model.to_string());
             }
+            // Set created timestamp
+            self.created = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            );
             if let Some(usage) = message.get("usage").and_then(|v| v.as_object())
                 && let Some(input_tokens) = usage.get("input_tokens").and_then(|v| v.as_u64())
             {
@@ -448,7 +455,6 @@ impl AnthropicToOpenai {
 
         if let Some((tool_id, tool_name, tool_input)) = tool_call {
             delta["tool_calls"] = json!([{
-                "index": 0,
                 "id": tool_id,
                 "type": "function",
                 "function": {
@@ -458,10 +464,10 @@ impl AnthropicToOpenai {
             }]);
         }
 
-        let mut choice = json!({
+        let choice = json!({
             "index": 0,
             "delta": delta,
-            "finish_reason": finish_reason.unwrap_or("null")
+            "finish_reason": finish_reason.map(Json::from).unwrap_or(Json::Null)
         });
 
         let mut result = json!({
@@ -833,5 +839,148 @@ mod tests {
         assert!(result.is_some());
         let lines = result.unwrap();
         assert!(lines.iter().any(|e| matches!(e, SseLine::Done)));
+    }
+
+    // ============================================================================
+    // Protocol compliance tests
+    // ============================================================================
+
+    #[test]
+    fn test_finish_reason_is_json_null_when_not_finished() {
+        // Test that finish_reason is JSON null (not string "null") when not finished
+        let mut converter = AnthropicToOpenai::default();
+
+        // Establish state
+        let _ = converter.insert(SseLine::Data(json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_abc",
+                "model": "claude-test",
+                "usage": { "input_tokens": 10, "output_tokens": 0 }
+            }
+        })));
+
+        // Send content delta - should generate chunk with finish_reason: null (JSON null)
+        let event = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "text_delta",
+                "text": "Hello"
+            }
+        });
+
+        let chunk = converter.insert(SseLine::Data(event)).unwrap();
+
+        assert!(chunk.is_some());
+        let lines = chunk.unwrap();
+
+        // Verify finish_reason is JSON null, not string "null"
+        let data_line = lines.iter().find_map(|e| match e {
+            SseLine::Data(d) => Some(d),
+            _ => None,
+        });
+        assert!(data_line.is_some());
+
+        let finish_reason = &data_line.unwrap()["choices"][0]["finish_reason"];
+        // JSON null should have as_str() return None
+        assert!(
+            finish_reason.as_str().is_none(),
+            "finish_reason should be JSON null, not a string"
+        );
+        assert!(finish_reason.is_null(), "finish_reason should be JSON null");
+    }
+
+    #[test]
+    fn test_message_delta_usage_inside_delta() {
+        // Test that message_delta has usage inside delta object (per Anthropic spec)
+        let mut converter = OpenaiToAnthropic::default();
+
+        // Establish state
+        let _ = converter.insert(SseLine::Data(json!({
+            "choices": [{ "delta": { "role": "assistant" } }]
+        })));
+
+        // Send finish with usage
+        let chunk = json!({
+            "choices": [{
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 8,
+                "total_tokens": 18
+            }
+        });
+
+        let events = converter.insert(SseLine::Data(chunk)).unwrap();
+        assert!(events.is_some());
+
+        // Find message_delta event and verify usage is inside delta
+        let message_delta_data = events.unwrap().iter().find_map(|e| match e {
+            SseLine::Data(d) if d.get("type").and_then(|v| v.as_str()) == Some("message_delta") => {
+                Some(d.clone())
+            }
+            _ => None,
+        });
+
+        assert!(
+            message_delta_data.is_some(),
+            "Should have message_delta event"
+        );
+        let data = message_delta_data.unwrap();
+
+        // usage should be inside delta object (per Anthropic spec)
+        assert!(
+            data.get("delta").and_then(|d| d.get("usage")).is_some(),
+            "usage should be inside delta object"
+        );
+    }
+
+    #[test]
+    fn test_created_timestamp_is_set() {
+        // Test that created timestamp is set (not default 0)
+        let mut converter = AnthropicToOpenai::default();
+
+        // Establish state
+        let _ = converter.insert(SseLine::Data(json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_ts_test",
+                "model": "claude-test",
+                "usage": { "input_tokens": 5, "output_tokens": 0 }
+            }
+        })));
+
+        // Send content delta
+        let event = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "text_delta",
+                "text": "Test"
+            }
+        });
+
+        let chunk = converter.insert(SseLine::Data(event)).unwrap();
+
+        assert!(chunk.is_some());
+        let lines = chunk.unwrap();
+
+        // Verify created field is not 0
+        let data_line = lines.iter().find_map(|e| match e {
+            SseLine::Data(d) => Some(d),
+            _ => None,
+        });
+        assert!(data_line.is_some());
+
+        let created = data_line.unwrap()["created"].as_u64();
+        assert!(created.is_some(), "created field should be a number");
+        assert!(
+            created.unwrap() > 0,
+            "created timestamp should be > 0, got {:?}",
+            created
+        );
     }
 }

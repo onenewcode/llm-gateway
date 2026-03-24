@@ -1,5 +1,5 @@
 use super::{ProtocolError, ProtocolResult};
-use serde_json::{Map, Value as Json, json};
+use serde_json::{Value as Json, json};
 
 pub(crate) fn openai_to_anthropic(body: Json) -> ProtocolResult<Json> {
     let obj = body.as_object().ok_or_else(|| {
@@ -108,7 +108,92 @@ pub(crate) fn openai_to_anthropic(body: Json) -> ProtocolResult<Json> {
         result["stream_options"] = stream_options.clone()
     }
 
+    // Convert tools if present
+    if let Some(tools) = obj.get("tools").and_then(|v| v.as_array()) {
+        let converted_tools: Vec<_> = tools.iter().filter_map(convert_openai_tool).collect();
+        if !converted_tools.is_empty() {
+            result["tools"] = json!(converted_tools);
+        }
+    }
+
+    // Convert tool_choice if present
+    if let Some(tool_choice) = obj.get("tool_choice")
+        && let Some(converted) = convert_openai_tool_choice(tool_choice)
+    {
+        result["tool_choice"] = converted;
+    }
+
+    // Convert response_format if present
+    if let Some(response_format) = obj.get("response_format")
+        && let Some(format_type) = response_format.get("type").and_then(|v| v.as_str())
+        && format_type == "json_object"
+    {
+        // Append JSON format instruction to system prompt
+        let json_instruction = " Please respond in JSON format.";
+        if let Some(system) = result.get("system").and_then(|v| v.as_str()) {
+            result["system"] = json!(format!("{}{}", system, json_instruction));
+        } else {
+            result["system"] = json!(json_instruction.trim());
+        }
+    }
+
+    // Note: seed and user fields are dropped (no Anthropic equivalent)
+
     Ok(result)
+}
+
+/// Convert OpenAI tool definition to Anthropic format
+fn convert_openai_tool(tool: &Json) -> Option<Json> {
+    let obj = tool.as_object()?;
+
+    // Handle OpenAI tool format
+    if let Some(function) = obj.get("function").and_then(|v| v.as_object()) {
+        let name = function.get("name")?.as_str()?.to_string();
+        let description = function
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        // OpenAI parameters is JSON Schema, directly map to input_schema
+        let input_schema = function
+            .get("parameters")
+            .cloned()
+            .unwrap_or_else(|| json!({"type": "object"}));
+
+        Some(json!({
+            "name": name,
+            "description": description,
+            "input_schema": input_schema
+        }))
+    } else {
+        // Pass through if already in Anthropic format
+        Some(tool.clone())
+    }
+}
+
+/// Convert OpenAI tool_choice to Anthropic format
+fn convert_openai_tool_choice(tool_choice: &Json) -> Option<Json> {
+    // Handle string format
+    if let Some(choice_str) = tool_choice.as_str() {
+        return match choice_str {
+            "auto" => Some(json!({"type": "auto"})),
+            "none" => Some(json!({"type": "none"})),
+            "required" => Some(json!({"type": "any"})),
+            _ => None,
+        };
+    }
+
+    // Handle object format
+    if let Some(obj) = tool_choice.as_object()
+        && let Some(choice_type) = obj.get("type").and_then(|v| v.as_str())
+        && choice_type == "function"
+        && let Some(function) = obj.get("function").and_then(|v| v.as_object())
+        && let Some(name) = function.get("name").and_then(|v| v.as_str())
+    {
+        return Some(json!({"type": "tool", "name": name}));
+    }
+
+    None
 }
 
 pub(crate) fn anthropic_to_openai(body: Json) -> ProtocolResult<Json> {
@@ -211,7 +296,78 @@ pub(crate) fn anthropic_to_openai(body: Json) -> ProtocolResult<Json> {
         result["stream"] = stream.clone()
     }
 
+    // Convert tools if present
+    if let Some(tools) = obj.get("tools").and_then(|v| v.as_array()) {
+        let converted_tools: Vec<_> = tools.iter().filter_map(convert_anthropic_tool).collect();
+        if !converted_tools.is_empty() {
+            result["tools"] = json!(converted_tools);
+        }
+    }
+
+    // Convert tool_choice if present
+    if let Some(tool_choice) = obj.get("tool_choice")
+        && let Some(converted) = convert_anthropic_tool_choice(tool_choice)
+    {
+        result["tool_choice"] = converted;
+    }
+
+    // Note: seed and user fields have no Anthropic equivalent
+    // Note: Anthropic metadata is dropped
+
     Ok(result)
+}
+
+/// Convert Anthropic tool definition to OpenAI format
+fn convert_anthropic_tool(tool: &Json) -> Option<Json> {
+    let obj = tool.as_object()?;
+
+    // Check if it's already in OpenAI format (pass through)
+    if obj.get("function").is_some() {
+        return Some(tool.clone());
+    }
+
+    // Handle Anthropic tool format
+    let name = obj.get("name")?.as_str()?.to_string();
+    let description = obj
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    // Anthropic input_schema maps to OpenAI parameters
+    let parameters = obj
+        .get("input_schema")
+        .cloned()
+        .unwrap_or_else(|| json!({"type": "object"}));
+
+    Some(json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": parameters
+        }
+    }))
+}
+
+/// Convert Anthropic tool_choice to OpenAI format
+fn convert_anthropic_tool_choice(tool_choice: &Json) -> Option<Json> {
+    if let Some(obj) = tool_choice.as_object()
+        && let Some(choice_type) = obj.get("type").and_then(|v| v.as_str())
+    {
+        return match choice_type {
+            "auto" => Some(json!("auto")),
+            "none" => Some(json!("none")),
+            "any" => Some(json!("required")),
+            "tool" => obj.get("name").and_then(|v| v.as_str()).map(|name| {
+                json!({
+                    "type": "function",
+                    "function": {"name": name}
+                })
+            }),
+            _ => None,
+        };
+    }
+    None
 }
 
 #[cfg(test)]
@@ -928,5 +1084,277 @@ mod test {
         });
 
         assert_eq!(anthropic_to_openai(anthropic_request), Ok(expected))
+    }
+
+    // ============================================================================
+    // Tool definition conversion tests
+    // ============================================================================
+
+    #[test]
+    fn test_openai_to_anthropic_tools_conversion() {
+        let openai_request = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "Get weather"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"}
+                        },
+                        "required": ["location"]
+                    }
+                }
+            }]
+        });
+
+        let expected = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "Get weather"}
+            ],
+            "max_tokens": 2048,
+            "tools": [{
+                "name": "get_weather",
+                "description": "Get current weather",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string"}
+                    },
+                    "required": ["location"]
+                }
+            }]
+        });
+
+        assert_eq!(openai_to_anthropic(openai_request), Ok(expected))
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_tools_conversion() {
+        let anthropic_request = json!({
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Get weather"}
+            ],
+            "tools": [{
+                "name": "get_weather",
+                "description": "Get current weather",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string"}
+                    },
+                    "required": ["location"]
+                }
+            }]
+        });
+
+        let expected = json!({
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Get weather"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"}
+                        },
+                        "required": ["location"]
+                    }
+                }
+            }]
+        });
+
+        assert_eq!(anthropic_to_openai(anthropic_request), Ok(expected))
+    }
+
+    // ============================================================================
+    // Tool choice conversion tests
+    // ============================================================================
+
+    #[test]
+    fn test_openai_to_anthropic_tool_choice_auto() {
+        let openai_request = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Test"}],
+            "tool_choice": "auto"
+        });
+
+        let expected = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Test"}],
+            "max_tokens": 2048,
+            "tool_choice": {"type": "auto"}
+        });
+
+        assert_eq!(openai_to_anthropic(openai_request), Ok(expected))
+    }
+
+    #[test]
+    fn test_openai_to_anthropic_tool_choice_none() {
+        let openai_request = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Test"}],
+            "tool_choice": "none"
+        });
+
+        let expected = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Test"}],
+            "max_tokens": 2048,
+            "tool_choice": {"type": "none"}
+        });
+
+        assert_eq!(openai_to_anthropic(openai_request), Ok(expected))
+    }
+
+    #[test]
+    fn test_openai_to_anthropic_tool_choice_required() {
+        let openai_request = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Test"}],
+            "tool_choice": "required"
+        });
+
+        let expected = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Test"}],
+            "max_tokens": 2048,
+            "tool_choice": {"type": "any"}
+        });
+
+        assert_eq!(openai_to_anthropic(openai_request), Ok(expected))
+    }
+
+    #[test]
+    fn test_openai_to_anthropic_tool_choice_specific() {
+        let openai_request = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Test"}],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"}
+            }
+        });
+
+        let expected = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Test"}],
+            "max_tokens": 2048,
+            "tool_choice": {"type": "tool", "name": "get_weather"}
+        });
+
+        assert_eq!(openai_to_anthropic(openai_request), Ok(expected))
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_tool_choice_auto() {
+        let anthropic_request = json!({
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Test"}],
+            "tool_choice": {"type": "auto"}
+        });
+
+        let expected = json!({
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Test"}],
+            "tool_choice": "auto"
+        });
+
+        assert_eq!(anthropic_to_openai(anthropic_request), Ok(expected))
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_tool_choice_any() {
+        let anthropic_request = json!({
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Test"}],
+            "tool_choice": {"type": "any"}
+        });
+
+        let expected = json!({
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Test"}],
+            "tool_choice": "required"
+        });
+
+        assert_eq!(anthropic_to_openai(anthropic_request), Ok(expected))
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_tool_choice_specific() {
+        let anthropic_request = json!({
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Test"}],
+            "tool_choice": {"type": "tool", "name": "get_weather"}
+        });
+
+        let expected = json!({
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Test"}],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"}
+            }
+        });
+
+        assert_eq!(anthropic_to_openai(anthropic_request), Ok(expected))
+    }
+
+    // ============================================================================
+    // Response format conversion tests
+    // ============================================================================
+
+    #[test]
+    fn test_openai_to_anthropic_response_format_json_object() {
+        let openai_request = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Generate JSON"}],
+            "response_format": {"type": "json_object"}
+        });
+
+        let result = openai_to_anthropic(openai_request).unwrap();
+        assert!(result.get("system").is_some());
+        assert!(result["system"].as_str().unwrap().contains("JSON"));
+    }
+
+    #[test]
+    fn test_openai_to_anthropic_response_format_json_object_with_existing_system() {
+        let openai_request = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "system", "content": "You are helpful"},
+                {"role": "user", "content": "Generate JSON"}
+            ],
+            "response_format": {"type": "json_object"}
+        });
+
+        let result = openai_to_anthropic(openai_request).unwrap();
+        assert!(
+            result["system"]
+                .as_str()
+                .unwrap()
+                .contains("You are helpful")
+        );
+        assert!(result["system"].as_str().unwrap().contains("JSON"));
     }
 }

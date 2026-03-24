@@ -1,11 +1,8 @@
-﻿#![allow(unused)]
-
-mod request;
+﻿mod request;
 mod response;
 mod streaming;
 
 use std::{error, fmt};
-pub use {request::*, response::*, streaming::*};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProtocolError {
