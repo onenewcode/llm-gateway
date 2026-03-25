@@ -124,14 +124,7 @@ impl FromStr for GatewayConfig {
                         })
                         .unwrap_or_default();
 
-                    nodes.insert(
-                        name.clone().into(),
-                        Node::Input(InputNode {
-                            name: name.clone().into(),
-                            port,
-                            models,
-                        }),
-                    );
+                    nodes.insert(name.clone().into(), Node::Input(InputNode { port, models }));
                 }
             }
         }
@@ -180,10 +173,7 @@ impl FromStr for GatewayConfig {
                 // 格式 1: 简单字符串值 - [backend] 下的键值对
                 // 例如："backend-1" = "http://192.168.1.1:8000"
                 if let Some(url_str) = value.as_str() {
-                    let base_url = BaseUrl {
-                        map: HashMap::new(),
-                        default: url_str.to_string(),
-                    };
+                    let base_url = BaseUrl::AllInOne(url_str.into());
 
                     nodes.insert(
                         name.clone().into(),
@@ -202,28 +192,16 @@ impl FromStr for GatewayConfig {
                     let base_url = if let Some(url_value) = backend_config.get("base-url") {
                         if let Some(url_str) = url_value.as_str() {
                             // 简单字符串格式：base-url = "http://..."
-                            BaseUrl {
-                                map: HashMap::new(),
-                                default: url_str.to_string(),
-                            }
+                            BaseUrl::AllInOne(url_str.into())
                         } else if let Some(url_table) = url_value.as_table() {
                             // 表格式带协议特定 URL：base-url = { anthropic = "..." }
                             let mut map = HashMap::new();
-                            let mut default = String::new();
                             for (protocol, url) in url_table {
                                 if let Some(url_str) = url.as_str() {
-                                    if protocol == "default" {
-                                        default = url_str.to_string();
-                                    } else {
-                                        map.insert(protocol.clone(), url_str.to_string());
-                                    }
+                                    map.insert(protocol.clone(), url_str.to_string());
                                 }
                             }
-                            // 如果没有显式指定 default，使用第一个 URL
-                            if default.is_empty() {
-                                default = map.values().next().cloned().unwrap_or_default();
-                            }
-                            BaseUrl { map, default }
+                            BaseUrl::Multi(map)
                         } else {
                             return Err(ConfigParseError::ParseError(
                                 "base-url 必须是字符串或表".to_string(),

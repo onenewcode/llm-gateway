@@ -1,6 +1,6 @@
-﻿mod request;
-mod response;
-mod streaming;
+﻿pub mod request;
+pub mod response;
+pub mod streaming;
 
 use std::{error, fmt};
 

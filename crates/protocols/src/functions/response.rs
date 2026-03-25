@@ -1,7 +1,7 @@
 use super::{ProtocolError, ProtocolResult};
 use serde_json::{Map, Value as Json, json};
 
-pub(crate) fn openai_to_anthropic(body: Json) -> ProtocolResult<Json> {
+pub fn openai_to_anthropic(body: Json) -> ProtocolResult<Json> {
     let obj = body.as_object().ok_or_else(|| {
         ProtocolError::InvalidRequest("Request body must be an object".to_string())
     })?;
@@ -129,7 +129,7 @@ pub(crate) fn openai_to_anthropic(body: Json) -> ProtocolResult<Json> {
     }))
 }
 
-pub(crate) fn anthropic_to_openai(body: Json) -> ProtocolResult<Json> {
+pub fn anthropic_to_openai(body: Json) -> ProtocolResult<Json> {
     let obj = body.as_object().ok_or_else(|| {
         ProtocolError::InvalidRequest("Request body must be an object".to_string())
     })?;

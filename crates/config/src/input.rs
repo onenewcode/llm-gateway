@@ -5,8 +5,6 @@
 //! - 接收客户端请求
 //! - 根据模型名称路由到对应的虚拟节点或后端
 
-use std::sync::Arc;
-
 /// 输入节点结构
 ///
 /// # 字段
@@ -16,7 +14,6 @@ use std::sync::Arc;
 /// * `models` - 支持的模型列表，请求将根据模型名路由
 #[derive(Clone, Debug)]
 pub struct InputNode {
-    pub name: Arc<str>,
     pub port: u16,
     pub models: Vec<String>,
 }
@@ -41,7 +38,6 @@ models = ["qwen3.5-35b-a3b", "kimi-k2.5"]
         assert!(config.nodes.contains_key("service"));
         match &config.nodes["service"] {
             crate::Node::Input(input) => {
-                assert_eq!(input.name.as_ref(), "service");
                 assert_eq!(input.port, 8000);
                 assert_eq!(input.models, vec!["qwen3.5-35b-a3b", "kimi-k2.5"]);
             }

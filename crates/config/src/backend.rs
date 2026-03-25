@@ -30,17 +30,12 @@ pub struct BackendNode {
 /// * `map` - 协议到 URL 的映射表
 /// * `default` - 默认 URL，当协议未在 map 中时使用
 #[derive(Clone, Debug)]
-pub struct BaseUrl {
-    pub map: HashMap<String, String>,
-    pub default: String,
+pub enum BaseUrl {
+    Multi(HashMap<String, String>),
+    AllInOne(String),
 }
 
 impl BaseUrl {
-    /// 获取默认 URL
-    pub fn default(&self) -> &str {
-        &self.default
-    }
-
     /// 根据协议获取对应的 URL
     ///
     /// # 参数
@@ -51,7 +46,10 @@ impl BaseUrl {
     ///
     /// 如果协议在 map 中，返回对应的 URL；否则返回 None
     pub fn get(&self, protocol: &str) -> Option<&str> {
-        self.map.get(protocol).map(|s| s.as_str())
+        match self {
+            Self::Multi(map) => map.get(protocol).map(|s| s.as_str()),
+            Self::AllInOne(url) => Some(url),
+        }
     }
 }
 
@@ -74,7 +72,14 @@ mod tests {
         assert!(config.nodes.contains_key("sglang-qwen3.5-35b-a3b"));
         match &config.nodes["sglang-qwen3.5-35b-a3b"] {
             Node::Backend(backend) => {
-                assert_eq!(backend.base_url.default(), "http://172.17.250.163:30001");
+                assert_eq!(
+                    backend.base_url.get("openai"),
+                    Some("http://172.17.250.163:30001")
+                );
+                assert_eq!(
+                    backend.base_url.get("anthropic"),
+                    Some("http://172.17.250.163:30001")
+                );
                 assert!(backend.api_key.is_none());
             }
             _ => panic!("Expected Backend node"),
@@ -96,6 +101,7 @@ api-key = "$ALIYUN_API_KEY"
         assert!(config.nodes.contains_key("aliyun"));
         match &config.nodes["aliyun"] {
             Node::Backend(backend) => {
+                assert_eq!(backend.base_url.get("openai"), None);
                 assert_eq!(
                     backend.base_url.get("anthropic"),
                     Some("https://dashscope.aliyuncs.com/apps/anthropic")
@@ -111,7 +117,7 @@ api-key = "$ALIYUN_API_KEY"
     fn test_parse_backend_with_default_url() {
         let toml_str = r#"
 [backend.aliyun]
-base-url = { default = "https://default.url", anthropic = "https://anthropic.url" }
+base-url = { openai = "https://openai.url", anthropic = "https://anthropic.url" }
 "#;
         let result = GatewayConfig::from_str(toml_str);
         assert!(result.is_ok());
@@ -119,7 +125,7 @@ base-url = { default = "https://default.url", anthropic = "https://anthropic.url
 
         match &config.nodes["aliyun"] {
             Node::Backend(backend) => {
-                assert_eq!(backend.base_url.default(), "https://default.url");
+                assert_eq!(backend.base_url.get("openai"), Some("https://openai.url"));
                 assert_eq!(
                     backend.base_url.get("anthropic"),
                     Some("https://anthropic.url")

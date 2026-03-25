@@ -85,4 +85,22 @@
 
 mod functions;
 
-pub use functions::*;
+pub use functions::request;
+pub use functions::response;
+pub use functions::streaming;
+pub use functions::{ProtocolError, ProtocolResult};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Protocol {
+    OpenAI,
+    Anthropic,
+}
+
+impl Protocol {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::OpenAI => "openai",
+            Self::Anthropic => "anthropic",
+        }
+    }
+}

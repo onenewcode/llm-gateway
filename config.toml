@@ -1,9 +1,9 @@
 ﻿# 表示这是一个输入节点
 [input.service]
 # 输入节点将打开一个指定的端口
-port = 8000
+port = 9000
 # 输入节点的后继是模型节点，根据协议中的 `model` 字段路由到指定名字的后继
-models = ["qwen3.5-35b-a3b", "qwen3.5-122b-a10b", "kimi-k2.5"]
+models = ["qwen3.5-35b-a3b", "qwen3.5-122b-a10b"]
 
 # 这是一个虚节点
 [node."qwen3.5-35b-a3b"]
@@ -19,7 +19,6 @@ sequence = ["sglang-qwen3.5-122b-a10b", "aliyun"]
 [backend]
 "sglang-qwen3.5-35b-a3b" = "http://172.17.250.163:30001"
 "sglang-qwen3.5-122b-a10b" = "http://172.17.250.163:30002"
-"sglang-kimi-k2.5" = "http://172.17.250.176:30001"
 
 # 这是一个后端节点
 [backend.aliyun]

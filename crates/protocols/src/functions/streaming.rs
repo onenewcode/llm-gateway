@@ -20,7 +20,7 @@ pub trait StreamingCollector {
 
 /// OpenAI to Anthropic streaming converter
 #[derive(Default)]
-pub(crate) struct OpenaiToAnthropic {
+pub struct OpenaiToAnthropic {
     id: Option<String>,
     model: Option<String>,
     created: Option<u64>,
@@ -248,7 +248,7 @@ impl OpenaiToAnthropic {
 
 /// Anthropic to OpenAI streaming converter
 #[derive(Default)]
-pub(crate) struct AnthropicToOpenai {
+pub struct AnthropicToOpenai {
     id: Option<String>,
     model: Option<String>,
     created: Option<u64>,
