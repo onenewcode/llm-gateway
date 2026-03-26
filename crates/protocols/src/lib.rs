@@ -84,11 +84,13 @@
 //! - `InvalidStreamEvent`: Invalid SSE event format
 
 mod functions;
+mod sse;
 
 pub use functions::request;
 pub use functions::response;
 pub use functions::streaming;
 pub use functions::{ProtocolError, ProtocolResult};
+pub use sse::{SseCollector, SseError, SseMessage, SseResult};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Protocol {
@@ -97,10 +99,33 @@ pub enum Protocol {
 }
 
 impl Protocol {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "openai" => Self::OpenAI,
+            "anthropic" => Self::Anthropic,
+            _ => panic!("Unknown protocol name {name}"),
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Self::OpenAI => "openai",
             Self::Anthropic => "anthropic",
+        }
+    }
+
+    pub fn from_path(path: &str) -> Self {
+        match path {
+            "/v1/chat/completions" => Self::OpenAI,
+            "/v1/messages" => Self::Anthropic,
+            _ => panic!("Unknown path {path}"),
+        }
+    }
+
+    pub fn path(&self) -> &str {
+        match self {
+            Self::OpenAI => "/v1/chat/completions",
+            Self::Anthropic => "/v1/messages",
         }
     }
 }

@@ -59,7 +59,7 @@ mod error;
 mod input;
 mod node;
 
-pub use backend::{BackendNode, BaseUrl};
+pub use backend::{BackendNode, BaseUrl, UrlResult};
 pub use error::Error as ConfigParseError;
 pub use input::InputNode;
 pub use node::{Node, VirtualNode};

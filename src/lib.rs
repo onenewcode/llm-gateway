@@ -39,11 +39,7 @@ impl RoutePayload {
     }
 
     pub fn protocol(&self) -> Protocol {
-        match self.parts.uri.path() {
-            "/v1/chat/completions" => Protocol::OpenAI,
-            "/v1/messages" => Protocol::Anthropic,
-            path => panic!("Unknown path {path}"),
-        }
+        Protocol::from_path(self.parts.uri.path())
     }
 }
 
@@ -138,7 +134,7 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
         }
     }
 
-    for (_, node) in &nodes {
+    for node in nodes.values() {
         node.replace_connections(&nodes)
     }
     for input in &ans {

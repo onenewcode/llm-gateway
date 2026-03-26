@@ -584,10 +584,6 @@ data: {"type":"message_stop"}
 - [Anthropic API Documentation - Messages](https://docs.anthropic.com/claude/reference/messages)
 - [Anthropic API Documentation - Streaming](https://docs.anthropic.com/claude/reference/messages-streaming)
 
-### 技术文档
-
-- [ZenMux Anthropic API Documentation](https://docs.zenmux.ai/zh/api/anthropic/create-messages.html)
-
 ### GitHub Issues
 
 - [vllm: Support Anthropic API /v1/messages endpoint](https://github.com/vllm-project/vllm/issues/21313)

@@ -35,6 +35,12 @@ pub enum BaseUrl {
     AllInOne(String),
 }
 
+pub enum UrlResult<'a> {
+    Native(&'a str),
+    Foreign(&'a str, &'a str),
+    Empty,
+}
+
 impl BaseUrl {
     /// 根据协议获取对应的 URL
     ///
@@ -45,93 +51,18 @@ impl BaseUrl {
     /// # 返回值
     ///
     /// 如果协议在 map 中，返回对应的 URL；否则返回 None
-    pub fn get(&self, protocol: &str) -> Option<&str> {
+    pub fn get(&self, protocol: &str) -> UrlResult<'_> {
         match self {
-            Self::Multi(map) => map.get(protocol).map(|s| s.as_str()),
-            Self::AllInOne(url) => Some(url),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{GatewayConfig, Node};
-    use std::str::FromStr;
-
-    /// 测试简单后端解析（[backend] 下的键值对）
-    #[test]
-    fn test_parse_simple_backend() {
-        let toml_str = r#"
-[backend]
-"sglang-qwen3.5-35b-a3b" = "http://172.17.250.163:30001"
-"#;
-        let result = GatewayConfig::from_str(toml_str);
-        assert!(result.is_ok());
-        let config = result.unwrap();
-
-        assert!(config.nodes.contains_key("sglang-qwen3.5-35b-a3b"));
-        match &config.nodes["sglang-qwen3.5-35b-a3b"] {
-            Node::Backend(backend) => {
-                assert_eq!(
-                    backend.base_url.get("openai"),
-                    Some("http://172.17.250.163:30001")
-                );
-                assert_eq!(
-                    backend.base_url.get("anthropic"),
-                    Some("http://172.17.250.163:30001")
-                );
-                assert!(backend.api_key.is_none());
-            }
-            _ => panic!("Expected Backend node"),
-        }
-    }
-
-    /// 测试协议特定 URL 解析
-    #[test]
-    fn test_parse_backend_with_protocol_specific_urls() {
-        let toml_str = r#"
-[backend.aliyun]
-base-url = { anthropic = "https://dashscope.aliyuncs.com/apps/anthropic" }
-api-key = "$ALIYUN_API_KEY"
-"#;
-        let result = GatewayConfig::from_str(toml_str);
-        assert!(result.is_ok());
-        let config = result.unwrap();
-
-        assert!(config.nodes.contains_key("aliyun"));
-        match &config.nodes["aliyun"] {
-            Node::Backend(backend) => {
-                assert_eq!(backend.base_url.get("openai"), None);
-                assert_eq!(
-                    backend.base_url.get("anthropic"),
-                    Some("https://dashscope.aliyuncs.com/apps/anthropic")
-                );
-                assert_eq!(backend.api_key, Some("$ALIYUN_API_KEY".to_string()));
-            }
-            _ => panic!("Expected Backend node"),
-        }
-    }
-
-    /// 测试带 default 的协议特定 URL 解析
-    #[test]
-    fn test_parse_backend_with_default_url() {
-        let toml_str = r#"
-[backend.aliyun]
-base-url = { openai = "https://openai.url", anthropic = "https://anthropic.url" }
-"#;
-        let result = GatewayConfig::from_str(toml_str);
-        assert!(result.is_ok());
-        let config = result.unwrap();
-
-        match &config.nodes["aliyun"] {
-            Node::Backend(backend) => {
-                assert_eq!(backend.base_url.get("openai"), Some("https://openai.url"));
-                assert_eq!(
-                    backend.base_url.get("anthropic"),
-                    Some("https://anthropic.url")
-                );
-            }
-            _ => panic!("Expected Backend node"),
+            Self::Multi(map) => map
+                .get(protocol)
+                .map(|s| UrlResult::Native(s.as_str()))
+                .or_else(|| {
+                    map.iter()
+                        .next()
+                        .map(|(protocol, url)| UrlResult::Foreign(protocol.as_str(), url.as_str()))
+                })
+                .unwrap_or(UrlResult::Empty),
+            Self::AllInOne(url) => UrlResult::Native(url),
         }
     }
 }

@@ -1,21 +1,11 @@
 use super::{ProtocolError, ProtocolResult};
+use crate::SseMessage;
 use serde_json::{Value as Json, json};
 
-/// SSE line type for streaming responses
-#[derive(Debug, Clone)]
-pub enum SseLine {
-    /// Event type line: `event: {type}`
-    Event(String),
-    /// Data line: `data: {json}`
-    Data(Json),
-    /// Done marker: `data: [DONE]`
-    Done,
-}
-
 /// Streaming collector trait for protocol conversion
-pub trait StreamingCollector {
-    /// Process a streaming line and return converted lines (if any)
-    fn insert(&mut self, line: SseLine) -> ProtocolResult<Option<Vec<SseLine>>>;
+pub trait StreamingCollector: Send + Sync {
+    /// Process an SSE message and return converted messages (if any)
+    fn process(&mut self, msg: SseMessage) -> ProtocolResult<Option<Vec<SseMessage>>>;
 }
 
 /// OpenAI to Anthropic streaming converter
@@ -27,17 +17,60 @@ pub struct OpenaiToAnthropic {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     initialized: bool,
+    finished: bool,
 }
 
 impl StreamingCollector for OpenaiToAnthropic {
-    fn insert(&mut self, line: SseLine) -> ProtocolResult<Option<Vec<SseLine>>> {
-        let SseLine::Data(chunk) = line else {
-            return Ok(None);
-        };
+    fn process(&mut self, msg: SseMessage) -> ProtocolResult<Option<Vec<SseMessage>>> {
+        // Handle [DONE] marker - if already finished, return empty
+        if msg.is_done() {
+            if self.finished {
+                // Already sent end-of-stream events via finish_reason, nothing to do
+                return Ok(None);
+            }
+            // Otherwise generate end-of-stream events (e.g., when OpenAI stream ends without finish_reason)
+            let mut ans = Vec::new();
+
+            // Generate content_block_stop
+            ans.push(SseMessage::with_event(
+                "content_block_stop",
+                &json!({
+                    "type": "content_block_stop",
+                    "index": 0
+                }),
+            ));
+
+            // Generate message_delta with end_turn
+            ans.push(SseMessage::with_event(
+                "message_delta",
+                &json!({
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": "end_turn",
+                        "stop_sequence": null,
+                        "usage": {
+                            "output_tokens": self.output_tokens.unwrap_or_default()
+                        }
+                    }
+                }),
+            ));
+
+            // Generate message_stop
+            ans.push(SseMessage::with_event(
+                "message_stop",
+                &json!({"type": "message_stop"}),
+            ));
+
+            self.finished = true;
+            return Ok(Some(ans));
+        }
+
+        let chunk: Json = serde_json::from_str(&msg.data)?;
 
         let mut ans = Vec::new();
         let obj = chunk
             .as_object()
+            .cloned()
             .ok_or_else(|| ProtocolError::InvalidRequest("Chunk must be an object".to_string()))?;
 
         // Initialize on first chunk
@@ -59,12 +92,16 @@ impl StreamingCollector for OpenaiToAnthropic {
             }
 
             // Generate message_start event
-            ans.push(SseLine::Event("message_start".to_string()));
-            ans.push(SseLine::Data(self.create_message_start()));
+            ans.push(SseMessage::with_event(
+                "message_start",
+                &self.create_message_start(),
+            ));
 
             // Generate content_block_start event
-            ans.push(SseLine::Event("content_block_start".to_string()));
-            ans.push(SseLine::Data(self.create_content_block_start(0)));
+            ans.push(SseMessage::with_event(
+                "content_block_start",
+                &self.create_content_block_start(0),
+            ));
 
             self.initialized = true;
         }
@@ -79,8 +116,27 @@ impl StreamingCollector for OpenaiToAnthropic {
                 if let Some(content) = delta.get("content").and_then(|v| v.as_str())
                     && !content.is_empty()
                 {
-                    ans.push(SseLine::Event("content_block_delta".to_string()));
-                    ans.push(SseLine::Data(self.create_content_block_delta(0, content)));
+                    ans.push(SseMessage::with_event(
+                        "content_block_delta",
+                        &self.create_content_block_delta(0, content),
+                    ));
+                }
+
+                // Handle reasoning content (thinking)
+                if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str())
+                    && !reasoning.is_empty()
+                {
+                    ans.push(SseMessage::with_event(
+                        "content_block_delta",
+                        &json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {
+                                "type": "thinking_delta",
+                                "thinking": reasoning
+                            }
+                        }),
+                    ));
                 }
 
                 // Handle tool calls
@@ -92,17 +148,15 @@ impl StreamingCollector for OpenaiToAnthropic {
                             let arguments = Self::extract_str(function, "arguments", "{}");
 
                             // Generate tool_use content_block_start
-                            ans.push(SseLine::Event("content_block_start".to_string()));
-                            ans.push(SseLine::Data(self.create_tool_use_block_start(
-                                1 + idx,
-                                &tool_id,
-                                &name,
-                            )));
+                            ans.push(SseMessage::with_event(
+                                "content_block_start",
+                                &self.create_tool_use_block_start(1 + idx, &tool_id, &name),
+                            ));
 
                             // Generate tool_use input delta
-                            ans.push(SseLine::Event("content_block_delta".to_string()));
-                            ans.push(SseLine::Data(
-                                self.create_input_json_delta(1 + idx, &arguments),
+                            ans.push(SseMessage::with_event(
+                                "content_block_delta",
+                                &self.create_input_json_delta(1 + idx, &arguments),
                             ));
                         }
                     }
@@ -115,19 +169,28 @@ impl StreamingCollector for OpenaiToAnthropic {
                 && !finish_reason.is_empty()
             {
                 // Generate content_block_stop
-                ans.push(SseLine::Event("content_block_stop".to_string()));
-                ans.push(SseLine::Data(json!({
-                    "type": "content_block_stop",
-                    "index": 0
-                })));
+                ans.push(SseMessage::with_event(
+                    "content_block_stop",
+                    &json!({
+                        "type": "content_block_stop",
+                        "index": 0
+                    }),
+                ));
 
                 // Generate message_delta
-                ans.push(SseLine::Event("message_delta".to_string()));
-                ans.push(SseLine::Data(self.create_message_delta(finish_reason)));
+                ans.push(SseMessage::with_event(
+                    "message_delta",
+                    &self.create_message_delta(finish_reason),
+                ));
 
                 // Generate message_stop
-                ans.push(SseLine::Event("message_stop".to_string()));
-                ans.push(SseLine::Data(json!({"type": "message_stop"})));
+                ans.push(SseMessage::with_event(
+                    "message_stop",
+                    &json!({"type": "message_stop"}),
+                ));
+
+                // Mark as finished so [DONE] won't generate duplicate events
+                self.finished = true;
             }
         }
 
@@ -261,10 +324,8 @@ pub struct AnthropicToOpenai {
 }
 
 impl StreamingCollector for AnthropicToOpenai {
-    fn insert(&mut self, line: SseLine) -> ProtocolResult<Option<Vec<SseLine>>> {
-        let SseLine::Data(event) = line else {
-            return Ok(None);
-        };
+    fn process(&mut self, msg: SseMessage) -> ProtocolResult<Option<Vec<SseMessage>>> {
+        let event: Json = serde_json::from_str(&msg.data)?;
 
         let obj = event.as_object().ok_or_else(|| {
             ProtocolError::InvalidStreamEvent("Event must be an object".to_string())
@@ -293,7 +354,7 @@ impl AnthropicToOpenai {
     fn handle_message_start(
         &mut self,
         obj: &serde_json::Map<String, Json>,
-    ) -> ProtocolResult<Option<Vec<SseLine>>> {
+    ) -> ProtocolResult<Option<Vec<SseMessage>>> {
         if let Some(message) = obj.get("message").and_then(|v| v.as_object()) {
             if let Some(id) = message.get("id").and_then(|v| v.as_str()) {
                 self.id = Some(id.to_string());
@@ -321,7 +382,7 @@ impl AnthropicToOpenai {
     fn handle_content_block_start(
         &mut self,
         obj: &serde_json::Map<String, Json>,
-    ) -> ProtocolResult<Option<Vec<SseLine>>> {
+    ) -> ProtocolResult<Option<Vec<SseMessage>>> {
         if let Some(content_block) = obj.get("content_block").and_then(|v| v.as_object()) {
             let block_type = content_block
                 .get("type")
@@ -350,7 +411,7 @@ impl AnthropicToOpenai {
     fn handle_content_block_delta(
         &mut self,
         obj: &serde_json::Map<String, Json>,
-    ) -> ProtocolResult<Option<Vec<SseLine>>> {
+    ) -> ProtocolResult<Option<Vec<SseMessage>>> {
         if let Some(delta) = obj.get("delta").and_then(|v| v.as_object()) {
             let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -358,10 +419,22 @@ impl AnthropicToOpenai {
                 "text_delta" => {
                     if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
                         // Generate OpenAI chunk with delta.content
-                        return Ok(Some(vec![SseLine::Data(self.create_chunk(
+                        return Ok(Some(vec![SseMessage::new(&self.create_chunk(
                             None,
                             Some(text),
                             None,
+                            None,
+                        ))]));
+                    }
+                }
+                "thinking_delta" => {
+                    if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
+                        // Generate OpenAI chunk with reasoning_content
+                        return Ok(Some(vec![SseMessage::new(&self.create_chunk(
+                            None,
+                            None,
+                            None,
+                            Some(thinking),
                         ))]));
                     }
                 }
@@ -381,7 +454,7 @@ impl AnthropicToOpenai {
     fn handle_content_block_stop(
         &mut self,
         _obj: &serde_json::Map<String, Json>,
-    ) -> ProtocolResult<Option<Vec<SseLine>>> {
+    ) -> ProtocolResult<Option<Vec<SseMessage>>> {
         // If this was a tool_use block, generate tool_calls chunk
         if self.current_block_type.as_deref() == Some("tool_use") {
             let tool_id = self.tool_id.take().unwrap_or_default();
@@ -392,8 +465,9 @@ impl AnthropicToOpenai {
                 None,
                 None,
                 Some((tool_id.as_str(), tool_name.as_str(), tool_input.as_str())),
+                None,
             );
-            return Ok(Some(vec![SseLine::Data(tool_calls_chunk)]));
+            return Ok(Some(vec![SseMessage::new(&tool_calls_chunk)]));
         }
         self.current_block_type = None;
         Ok(None)
@@ -402,7 +476,7 @@ impl AnthropicToOpenai {
     fn handle_message_delta(
         &mut self,
         obj: &serde_json::Map<String, Json>,
-    ) -> ProtocolResult<Option<Vec<SseLine>>> {
+    ) -> ProtocolResult<Option<Vec<SseMessage>>> {
         // Extract stop_reason
         let stop_reason = obj
             .get("delta")
@@ -422,23 +496,27 @@ impl AnthropicToOpenai {
         };
 
         // Extract usage
-        if let Some(usage) = obj.get("usage").and_then(|v| v.as_object())
-            && let Some(output_tokens) = usage.get("output_tokens").and_then(|v| v.as_u64())
-        {
-            self.output_tokens = Some(output_tokens);
+        if let Some(usage) = obj.get("usage").and_then(|v| v.as_object()) {
+            if let Some(input_tokens) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                self.input_tokens = Some(input_tokens);
+            }
+            if let Some(output_tokens) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                self.output_tokens = Some(output_tokens);
+            }
         }
 
         // Generate OpenAI chunk with finish_reason and usage
-        Ok(Some(vec![SseLine::Data(self.create_chunk(
+        Ok(Some(vec![SseMessage::new(&self.create_chunk(
             Some(finish_reason),
+            None,
             None,
             None,
         ))]))
     }
 
-    fn handle_message_stop(&mut self) -> ProtocolResult<Option<Vec<SseLine>>> {
+    fn handle_message_stop(&mut self) -> ProtocolResult<Option<Vec<SseMessage>>> {
         // Generate [DONE] marker
-        Ok(Some(vec![SseLine::Done]))
+        Ok(Some(vec![SseMessage::done()]))
     }
 
     fn create_chunk(
@@ -446,11 +524,16 @@ impl AnthropicToOpenai {
         finish_reason: Option<&str>,
         content: Option<&str>,
         tool_call: Option<(&str, &str, &str)>,
+        reasoning_content: Option<&str>,
     ) -> Json {
         let mut delta = json!({});
 
         if let Some(content) = content {
             delta["content"] = json!(content);
+        }
+
+        if let Some(reasoning) = reasoning_content {
+            delta["reasoning_content"] = json!(reasoning);
         }
 
         if let Some((tool_id, tool_name, tool_input)) = tool_call {
@@ -480,11 +563,20 @@ impl AnthropicToOpenai {
 
         // Add usage if we have it and this is the final chunk
         if finish_reason.is_some() {
-            result["usage"] = json!({
-                "prompt_tokens": self.input_tokens.unwrap_or_default(),
-                "completion_tokens": self.output_tokens.unwrap_or_default(),
-                "total_tokens": self.input_tokens.unwrap_or_default() + self.output_tokens.unwrap_or_default()
-            });
+            // Only include usage if we have at least one token count
+            if self.input_tokens.is_some() || self.output_tokens.is_some() {
+                let mut usage = json!({});
+                if let Some(input_tokens) = self.input_tokens {
+                    usage["prompt_tokens"] = json!(input_tokens);
+                }
+                if let Some(output_tokens) = self.output_tokens {
+                    usage["completion_tokens"] = json!(output_tokens);
+                }
+                if let (Some(input), Some(output)) = (self.input_tokens, self.output_tokens) {
+                    usage["total_tokens"] = json!(input + output);
+                }
+                result["usage"] = usage;
+            }
         }
 
         result
@@ -515,7 +607,7 @@ mod tests {
             }]
         });
 
-        let events = converter.insert(SseLine::Data(chunk)).unwrap();
+        let events = converter.process(SseMessage::new(&chunk)).unwrap();
 
         // Should generate message_start and content_block_start
         assert!(events.is_some());
@@ -523,12 +615,12 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, SseLine::Event(e) if e == "message_start"))
+                .any(|e| e.event.as_deref() == Some("message_start"))
         );
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, SseLine::Event(e) if e == "content_block_start"))
+                .any(|e| e.event.as_deref() == Some("content_block_start"))
         );
     }
 
@@ -537,7 +629,7 @@ mod tests {
         let mut converter = OpenaiToAnthropic::default();
 
         // First establish state
-        let _ = converter.insert(SseLine::Data(json!({
+        let _ = converter.process(SseMessage::new(&json!({
             "id": "chatcmpl-abc",
             "model": "gpt-4",
             "choices": [{ "delta": { "role": "assistant" } }]
@@ -551,7 +643,7 @@ mod tests {
             }]
         });
 
-        let events = converter.insert(SseLine::Data(chunk)).unwrap();
+        let events = converter.process(SseMessage::new(&chunk)).unwrap();
 
         // Should generate content_block_delta with text_delta
         assert!(events.is_some());
@@ -559,7 +651,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, SseLine::Event(e) if e == "content_block_delta"))
+                .any(|e| e.event.as_deref() == Some("content_block_delta"))
         );
     }
 
@@ -568,7 +660,7 @@ mod tests {
         let mut converter = OpenaiToAnthropic::default();
 
         // Establish state
-        let _ = converter.insert(SseLine::Data(json!({
+        let _ = converter.process(SseMessage::new(&json!({
             "choices": [{ "delta": { "role": "assistant" } }]
         })));
 
@@ -585,7 +677,7 @@ mod tests {
             }
         });
 
-        let events = converter.insert(SseLine::Data(chunk)).unwrap();
+        let events = converter.process(SseMessage::new(&chunk)).unwrap();
 
         // Should generate message_delta with stop_reason: end_turn
         assert!(events.is_some());
@@ -593,12 +685,111 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, SseLine::Event(e) if e == "message_delta"))
+                .any(|e| e.event.as_deref() == Some("message_delta"))
         );
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, SseLine::Event(e) if e == "message_stop"))
+                .any(|e| e.event.as_deref() == Some("message_stop"))
+        );
+    }
+
+    #[test]
+    fn test_openai_to_anthropic_handles_done_marker() {
+        let mut converter = OpenaiToAnthropic::default();
+
+        // Initialize converter state first
+        let _ = converter.process(SseMessage::new(&json!({
+            "id": "chatcmpl-abc",
+            "model": "gpt-4",
+            "choices": [{ "delta": { "role": "assistant" } }]
+        })));
+
+        // Set output_tokens to verify it's included in message_delta
+        converter.output_tokens = Some(42);
+
+        // Send [DONE] marker - should generate exactly the three Anthropic ending events
+        let result = converter.process(SseMessage::done()).unwrap();
+
+        assert!(result.is_some());
+        let events = result.unwrap();
+
+        // Must generate exactly 3 events
+        assert_eq!(events.len(), 3, "Should generate exactly 3 events");
+
+        // Event 1: content_block_stop
+        assert_eq!(events[0].event.as_deref(), Some("content_block_stop"));
+        let data1: Json = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(
+            data1,
+            json!({
+                "type": "content_block_stop",
+                "index": 0
+            })
+        );
+
+        // Event 2: message_delta - per Anthropic spec, usage only has output_tokens
+        assert_eq!(events[1].event.as_deref(), Some("message_delta"));
+        let data2: Json = serde_json::from_str(&events[1].data).unwrap();
+        assert_eq!(
+            data2,
+            json!({
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": "end_turn",
+                    "stop_sequence": null,
+                    "usage": {
+                        "output_tokens": 42
+                    }
+                }
+            })
+        );
+
+        // Event 3: message_stop
+        assert_eq!(events[2].event.as_deref(), Some("message_stop"));
+        let data3: Json = serde_json::from_str(&events[2].data).unwrap();
+        assert_eq!(data3, json!({"type": "message_stop"}));
+    }
+
+    #[test]
+    fn test_openai_done_after_finish_reason_generates_no_extra_events() {
+        let mut converter = OpenaiToAnthropic::default();
+
+        // Initialize converter
+        let _ = converter.process(SseMessage::new(&json!({
+            "id": "chatcmpl-abc",
+            "model": "gpt-4",
+            "choices": [{ "delta": { "role": "assistant" } }]
+        })));
+
+        // Send chunk with finish_reason - this generates the 3 end events
+        let result = converter
+            .process(SseMessage::new(&json!({
+                "choices": [{
+                    "delta": {},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15
+                }
+            })))
+            .unwrap();
+
+        assert!(result.is_some());
+        let events = result.unwrap();
+        assert_eq!(
+            events.len(),
+            3,
+            "finish_reason should generate 3 end events"
+        );
+
+        // Now send [DONE] - should NOT generate duplicate events
+        let result = converter.process(SseMessage::done()).unwrap();
+        assert!(
+            result.is_none(),
+            "[DONE] after finish_reason should not generate extra events"
         );
     }
 
@@ -625,7 +816,7 @@ mod tests {
             }
         });
 
-        let chunk = converter.insert(SseLine::Data(event)).unwrap();
+        let chunk = converter.process(SseMessage::new(&event)).unwrap();
 
         // Should return None (no output yet)
         assert!(chunk.is_none());
@@ -636,7 +827,7 @@ mod tests {
         let mut converter = AnthropicToOpenai::default();
 
         // Establish state
-        let _ = converter.insert(SseLine::Data(json!({
+        let _ = converter.process(SseMessage::new(&json!({
             "type": "message_start",
             "message": {
                 "id": "msg_abc",
@@ -655,14 +846,15 @@ mod tests {
             }
         });
 
-        let chunk = converter.insert(SseLine::Data(event)).unwrap();
+        let chunk = converter.process(SseMessage::new(&event)).unwrap();
 
         // Should generate OpenAI chunk with delta.content
         assert!(chunk.is_some());
         let lines = chunk.unwrap();
-        assert!(lines.iter().any(
-            |e| matches!(e, SseLine::Data(d) if d["choices"][0]["delta"]["content"] == "Hello")
-        ));
+        assert!(lines.iter().any(|e| {
+            let data: Json = serde_json::from_str(&e.data).unwrap();
+            data["choices"][0]["delta"]["content"] == "Hello"
+        }));
     }
 
     #[test]
@@ -670,7 +862,7 @@ mod tests {
         let mut converter = AnthropicToOpenai::default();
 
         // Establish state
-        let _ = converter.insert(SseLine::Data(json!({
+        let _ = converter.process(SseMessage::new(&json!({
             "type": "message_start",
             "message": {
                 "id": "msg_abc",
@@ -690,16 +882,15 @@ mod tests {
             }
         });
 
-        let chunk = converter.insert(SseLine::Data(event)).unwrap();
+        let chunk = converter.process(SseMessage::new(&event)).unwrap();
 
         // Should generate OpenAI chunk with finish_reason: stop
         assert!(chunk.is_some());
         let lines = chunk.unwrap();
-        assert!(
-            lines.iter().any(
-                |e| matches!(e, SseLine::Data(d) if d["choices"][0]["finish_reason"] == "stop")
-            )
-        );
+        assert!(lines.iter().any(|e| {
+            let data: Json = serde_json::from_str(&e.data).unwrap();
+            data["choices"][0]["finish_reason"] == "stop"
+        }));
     }
 
     // ============================================================================
@@ -711,7 +902,7 @@ mod tests {
         let mut converter = OpenaiToAnthropic::default();
 
         // First establish state
-        let _ = converter.insert(SseLine::Data(json!({
+        let _ = converter.process(SseMessage::new(&json!({
             "id": "chatcmpl-tool",
             "model": "gpt-4",
             "choices": [{ "delta": { "role": "assistant" } }]
@@ -733,7 +924,7 @@ mod tests {
             }]
         });
 
-        let events = converter.insert(SseLine::Data(chunk)).unwrap();
+        let events = converter.process(SseMessage::new(&chunk)).unwrap();
 
         // Should generate tool_use content_block_start and input_json_delta
         assert!(events.is_some());
@@ -741,12 +932,12 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, SseLine::Event(e) if e == "content_block_start"))
+                .any(|e| e.event.as_deref() == Some("content_block_start"))
         );
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, SseLine::Event(e) if e == "content_block_delta"))
+                .any(|e| e.event.as_deref() == Some("content_block_delta"))
         );
     }
 
@@ -755,7 +946,7 @@ mod tests {
         let mut converter = AnthropicToOpenai::default();
 
         // Establish state
-        let _ = converter.insert(SseLine::Data(json!({
+        let _ = converter.process(SseMessage::new(&json!({
             "type": "message_start",
             "message": {
                 "id": "msg_tool",
@@ -765,7 +956,7 @@ mod tests {
         })));
 
         // tool_use content_block_start
-        let _ = converter.insert(SseLine::Data(json!({
+        let _ = converter.process(SseMessage::new(&json!({
             "type": "content_block_start",
             "index": 0,
             "content_block": {
@@ -777,7 +968,7 @@ mod tests {
         })));
 
         // input_json_delta
-        let _ = converter.insert(SseLine::Data(json!({
+        let _ = converter.process(SseMessage::new(&json!({
             "type": "content_block_delta",
             "index": 0,
             "delta": {
@@ -788,7 +979,7 @@ mod tests {
 
         // content_block_stop - should generate tool_calls chunk
         let chunk = converter
-            .insert(SseLine::Data(json!({
+            .process(SseMessage::new(&json!({
                 "type": "content_block_stop",
                 "index": 0
             })))
@@ -800,7 +991,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|e| matches!(e, SseLine::Data(d) if d.to_string().contains("\"tool_calls\"")))
+                .any(|e| e.data.to_string().contains("\"tool_calls\""))
         );
     }
 
@@ -809,7 +1000,7 @@ mod tests {
         let mut converter = AnthropicToOpenai::default();
 
         // Invalid event type
-        let result = converter.insert(SseLine::Data(json!({
+        let result = converter.process(SseMessage::new(&json!({
             "type": "invalid_event_type"
         })));
 
@@ -820,25 +1011,25 @@ mod tests {
 
     #[test]
     fn test_sse_line_done_variant() {
-        // Test SseLine::Done handling
+        // Test [DONE] marker handling
         let mut converter = AnthropicToOpenai::default();
 
         // Establish state
-        let _ = converter.insert(SseLine::Data(json!({
+        let _ = converter.process(SseMessage::new(&json!({
             "type": "message_start",
             "message": { "id": "msg", "model": "claude", "usage": { "input_tokens": 0, "output_tokens": 0 } }
         })));
 
-        // message_stop should return Done
+        // message_stop should return [DONE] marker
         let result = converter
-            .insert(SseLine::Data(json!({
+            .process(SseMessage::new(&json!({
                 "type": "message_stop"
             })))
             .unwrap();
 
         assert!(result.is_some());
         let lines = result.unwrap();
-        assert!(lines.iter().any(|e| matches!(e, SseLine::Done)));
+        assert!(lines.iter().any(|e| e.is_done()));
     }
 
     // ============================================================================
@@ -851,7 +1042,7 @@ mod tests {
         let mut converter = AnthropicToOpenai::default();
 
         // Establish state
-        let _ = converter.insert(SseLine::Data(json!({
+        let _ = converter.process(SseMessage::new(&json!({
             "type": "message_start",
             "message": {
                 "id": "msg_abc",
@@ -870,19 +1061,20 @@ mod tests {
             }
         });
 
-        let chunk = converter.insert(SseLine::Data(event)).unwrap();
+        let chunk = converter.process(SseMessage::new(&event)).unwrap();
 
         assert!(chunk.is_some());
         let lines = chunk.unwrap();
 
         // Verify finish_reason is JSON null, not string "null"
-        let data_line = lines.iter().find_map(|e| match e {
-            SseLine::Data(d) => Some(d),
-            _ => None,
-        });
-        assert!(data_line.is_some());
+        let data_line = lines
+            .iter()
+            .find(|e| !serde_json::from_str::<Json>(&e.data).unwrap().is_null())
+            .map(|e| &e.data)
+            .unwrap();
 
-        let finish_reason = &data_line.unwrap()["choices"][0]["finish_reason"];
+        let data_line: Json = serde_json::from_str(data_line).unwrap();
+        let finish_reason = &data_line["choices"][0]["finish_reason"];
         // JSON null should have as_str() return None
         assert!(
             finish_reason.as_str().is_none(),
@@ -897,7 +1089,7 @@ mod tests {
         let mut converter = OpenaiToAnthropic::default();
 
         // Establish state
-        let _ = converter.insert(SseLine::Data(json!({
+        let _ = converter.process(SseMessage::new(&json!({
             "choices": [{ "delta": { "role": "assistant" } }]
         })));
 
@@ -914,15 +1106,17 @@ mod tests {
             }
         });
 
-        let events = converter.insert(SseLine::Data(chunk)).unwrap();
+        let events = converter.process(SseMessage::new(&chunk)).unwrap();
         assert!(events.is_some());
 
         // Find message_delta event and verify usage is inside delta
-        let message_delta_data = events.unwrap().iter().find_map(|e| match e {
-            SseLine::Data(d) if d.get("type").and_then(|v| v.as_str()) == Some("message_delta") => {
-                Some(d.clone())
+        let message_delta_data = events.unwrap().iter().find_map(|e| {
+            let data: Json = serde_json::from_str(&e.data).unwrap();
+            if data.get("type").and_then(|v| v.as_str()) == Some("message_delta") {
+                Some(e.data.clone())
+            } else {
+                None
             }
-            _ => None,
         });
 
         assert!(
@@ -930,6 +1124,7 @@ mod tests {
             "Should have message_delta event"
         );
         let data = message_delta_data.unwrap();
+        let data: Json = serde_json::from_str(&data).unwrap();
 
         // usage should be inside delta object (per Anthropic spec)
         assert!(
@@ -944,7 +1139,7 @@ mod tests {
         let mut converter = AnthropicToOpenai::default();
 
         // Establish state
-        let _ = converter.insert(SseLine::Data(json!({
+        let _ = converter.process(SseMessage::new(&json!({
             "type": "message_start",
             "message": {
                 "id": "msg_ts_test",
@@ -963,24 +1158,110 @@ mod tests {
             }
         });
 
-        let chunk = converter.insert(SseLine::Data(event)).unwrap();
+        let chunk = converter.process(SseMessage::new(&event)).unwrap();
 
         assert!(chunk.is_some());
         let lines = chunk.unwrap();
 
         // Verify created field is not 0
-        let data_line = lines.iter().find_map(|e| match e {
-            SseLine::Data(d) => Some(d),
-            _ => None,
-        });
-        assert!(data_line.is_some());
-
-        let created = data_line.unwrap()["created"].as_u64();
+        let data_line = lines
+            .iter()
+            .find(|e| !serde_json::from_str::<Json>(&e.data).unwrap().is_null())
+            .map(|e| &e.data)
+            .unwrap();
+        let data_line: Json = serde_json::from_str(data_line).unwrap();
+        let created = data_line["created"].as_u64();
         assert!(created.is_some(), "created field should be a number");
         assert!(
             created.unwrap() > 0,
             "created timestamp should be > 0, got {:?}",
             created
         );
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_thinking_content() {
+        let mut converter = AnthropicToOpenai::default();
+
+        // Establish state with message_start
+        let _ = converter.process(SseMessage::new(&json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_abc",
+                "model": "claude-sonnet-4-5-20250929",
+                "usage": { "input_tokens": 10, "output_tokens": 0 }
+            }
+        })));
+
+        // Start thinking block
+        let _ = converter.process(SseMessage::new(&json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "thinking",
+                "thinking": ""
+            }
+        })));
+
+        // Send thinking delta
+        let event = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "thinking_delta",
+                "thinking": "Let me analyze this step by step..."
+            }
+        });
+
+        let chunk = converter.process(SseMessage::new(&event)).unwrap();
+
+        // Should generate OpenAI chunk with reasoning_content
+        assert!(chunk.is_some());
+        let lines = chunk.unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].event.is_none()); // OpenAI chunks don't have event field
+
+        let data: Json = serde_json::from_str(&lines[0].data).unwrap();
+        assert_eq!(
+            data["choices"][0]["delta"]["reasoning_content"],
+            "Let me analyze this step by step..."
+        );
+    }
+
+    #[test]
+    fn test_openai_to_anthropic_reasoning_content() {
+        let mut converter = OpenaiToAnthropic::default();
+
+        // First establish state
+        let _ = converter.process(SseMessage::new(&json!({
+            "id": "chatcmpl-abc",
+            "model": "gpt-4",
+            "choices": [{ "delta": { "role": "assistant" } }]
+        })));
+
+        // Send reasoning content delta
+        let chunk = json!({
+            "choices": [{
+                "delta": { "reasoning_content": "Let me think about this..." },
+                "finish_reason": null
+            }]
+        });
+
+        let events = converter.process(SseMessage::new(&chunk)).unwrap();
+
+        // Should generate thinking content_block_delta
+        assert!(events.is_some());
+        let events = events.unwrap();
+        assert_eq!(events.len(), 1);
+
+        // Check event type
+        assert_eq!(events[0].event.as_deref(), Some("content_block_delta"));
+
+        // Check data content
+        let data: Json = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(data["type"], "content_block_delta");
+        assert_eq!(data["index"], 0);
+        assert_eq!(data["delta"]["type"], "thinking_delta");
+        assert_eq!(data["delta"]["thinking"], "Let me think about this...");
     }
 }
