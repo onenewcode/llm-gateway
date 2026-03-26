@@ -56,11 +56,13 @@
 
 mod backend;
 mod error;
+mod health;
 mod input;
 mod node;
 
 pub use backend::{BackendNode, BaseUrl, UrlResult};
 pub use error::Error as ConfigParseError;
+pub use health::{HealthConfig, InternalHealthConfig};
 pub use input::InputNode;
 pub use node::{Node, VirtualNode};
 use std::{collections::HashMap, str::FromStr, sync::Arc};
@@ -72,6 +74,7 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 pub struct GatewayConfig {
     pub nodes: HashMap<Arc<str>, Node>,
     pub statistics: Option<llm_gateway_statistics::StatisticsConfig>,
+    pub health: Option<HealthConfig>,
 }
 
 impl FromStr for GatewayConfig {
@@ -87,6 +90,7 @@ impl FromStr for GatewayConfig {
             return Ok(GatewayConfig {
                 nodes: HashMap::new(),
                 statistics: None,
+                health: None,
             });
         };
 
@@ -94,6 +98,17 @@ impl FromStr for GatewayConfig {
         // 解析统计配置 [statistics]
         // ============================================
         let statistics = parse_statistics_config(root_table);
+
+        // ============================================
+        // 解析健康监控配置 [health]
+        // ============================================
+        let health = root_table
+            .get("health")
+            .and_then(|v| v.as_table())
+            .and_then(|table| {
+                let toml_str = toml::to_string(table).ok()?;
+                toml::from_str(&toml_str).ok()
+            });
 
         let mut nodes: HashMap<Arc<str>, Node> = HashMap::new();
 
@@ -235,7 +250,11 @@ impl FromStr for GatewayConfig {
             }
         }
 
-        Ok(GatewayConfig { nodes, statistics })
+        Ok(GatewayConfig {
+            nodes,
+            statistics,
+            health,
+        })
     }
 }
 

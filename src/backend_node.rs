@@ -1,4 +1,6 @@
-use crate::{Backend, Node, Route, RouteError, RoutePayload, RouteResult};
+use crate::{
+    Backend, Node, Route, RouteError, RoutePayload, RouteResult, health_monitor::HealthMonitor,
+};
 use llm_gateway_config::{BaseUrl, UrlResult};
 use llm_gateway_protocols::Protocol;
 use std::{collections::HashMap, sync::Arc};
@@ -7,6 +9,7 @@ pub(crate) struct BackendNode {
     pub(super) name: Arc<str>,
     pub(super) base_url: BaseUrl,
     pub(super) api_key: Option<String>,
+    pub(super) health: Arc<HealthMonitor>,
 }
 
 impl Node for BackendNode {
@@ -15,6 +18,11 @@ impl Node for BackendNode {
     }
 
     fn route(&self, payload: &RoutePayload) -> RouteResult {
+        // Check health availability first
+        if !self.health.is_available() {
+            return Err(RouteError::NoAvailable);
+        }
+
         let protocol = payload.protocol();
         match self.base_url.get(protocol.name()) {
             UrlResult::Native(url) => Ok(Route {
@@ -42,4 +50,8 @@ impl Node for BackendNode {
     }
 
     fn replace_connections(&self, _: &HashMap<&str, Arc<dyn Node>>) {}
+
+    fn health(&self) -> Option<&Arc<HealthMonitor>> {
+        Some(&self.health)
+    }
 }

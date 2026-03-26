@@ -11,6 +11,7 @@ use std::{
 
 mod backend_node;
 mod error;
+mod health_monitor;
 mod input_node;
 mod sequence_node;
 mod serve;
@@ -25,7 +26,9 @@ pub use llm_gateway_statistics::{
     StatsStoreManager, TimeGranularity,
 };
 
-use crate::{backend_node::BackendNode, sequence_node::SequenceNode};
+use crate::{
+    backend_node::BackendNode, health_monitor::HealthMonitor, sequence_node::SequenceNode,
+};
 
 /// 路由负载 - 在路由图中流动的请求上下文
 #[derive(Clone)]
@@ -77,6 +80,10 @@ pub trait Node: Send + Sync {
     fn route(&self, payload: &RoutePayload) -> RouteResult;
     /// 替换连接关系
     fn replace_connections(&self, nodes: &HashMap<&str, Arc<dyn Node>>);
+    /// 获取健康监控器 (仅 BackendNode 有)
+    fn health(&self) -> Option<&Arc<HealthMonitor>> {
+        None
+    }
 }
 
 pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
@@ -95,6 +102,13 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
             unimplemented!()
         }
     }
+
+    // Create health config - use defaults if not specified
+    let health_config = config
+        .health
+        .as_ref()
+        .map(|h| h.to_internal())
+        .unwrap_or_else(|| llm_gateway_config::HealthConfig::default().to_internal());
 
     let mut ans = Vec::new();
     let mut nodes: HashMap<&str, Arc<dyn Node>> = HashMap::new();
@@ -130,12 +144,15 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
                 }
             },
             ConfigNode::Backend(n) => {
+                // Create HealthMonitor for this backend
+                let health_monitor = Arc::new(HealthMonitor::new(health_config.clone()));
                 nodes.insert(
                     &**name,
                     Arc::new(BackendNode {
                         name: name.clone(),
                         base_url: n.base_url.clone(),
                         api_key: n.api_key.clone(),
+                        health: health_monitor,
                     }) as _,
                 );
             }

@@ -136,10 +136,11 @@ async fn handle_request(
 
             let method = payload.parts.method.clone();
             let path = payload.parts.uri.path().to_string();
+            let backend_node = nodes.first();
             let response = if payload.protocol() == backend.protocol {
-                forward_to_backend(payload, backend, client).await
+                forward_to_backend(payload, backend, client, backend_node).await
             } else {
-                forward_to_foreign(payload, backend, client).await
+                forward_to_foreign(payload, backend, client, backend_node).await
             };
 
             // 记录成功事件
@@ -272,6 +273,7 @@ async fn forward_to_backend(
     payload: RoutePayload,
     backend: Backend,
     client: HttpsClient,
+    backend_node: Option<&Arc<dyn crate::Node>>,
 ) -> Result<Response<BoxBody>, GatewayError> {
     // 重建 URI
     let uri = format!("{}{}", backend.base_url, payload.parts.uri.path())
@@ -324,6 +326,11 @@ async fn forward_to_backend(
     // 发送请求到后端
     match client.request(forward_req).await {
         Ok(response) => {
+            if let Some(node) = backend_node
+                && let Some(health) = node.health()
+            {
+                health.record_success();
+            }
             let (parts, body) = response.into_parts();
 
             // 流式转发后端响应体
@@ -334,9 +341,16 @@ async fn forward_to_backend(
                     .boxed(),
             ))
         }
-        Err(_) => Err(GatewayError::BackendRequestFailed(
-            "Failed to connect to backend".into(),
-        )),
+        Err(_) => {
+            if let Some(node) = backend_node
+                && let Some(health) = node.health()
+            {
+                health.record_failure().await;
+            }
+            Err(GatewayError::BackendRequestFailed(
+                "Failed to connect to backend".into(),
+            ))
+        }
     }
 }
 
@@ -344,6 +358,7 @@ async fn forward_to_foreign(
     payload: RoutePayload,
     backend: Backend,
     client: HttpsClient,
+    backend_node: Option<&Arc<dyn crate::Node>>,
 ) -> Result<Response<BoxBody>, GatewayError> {
     let protocol = payload.protocol();
     log::info!("forward to foreign: {protocol:?} -> {:?}", backend.protocol);
@@ -411,10 +426,24 @@ async fn forward_to_foreign(
 
     // 发送请求到后端
     match client.request(forward_req).await {
-        Ok(response) => Ok(forward_foreign_response(response, converter)),
-        Err(_) => Err(GatewayError::BackendRequestFailed(
-            "Failed to connect to backend".into(),
-        )),
+        Ok(response) => {
+            if let Some(node) = backend_node
+                && let Some(health) = node.health()
+            {
+                health.record_success();
+            }
+            Ok(forward_foreign_response(response, converter))
+        }
+        Err(_) => {
+            if let Some(node) = backend_node
+                && let Some(health) = node.health()
+            {
+                health.record_failure().await;
+            }
+            Err(GatewayError::BackendRequestFailed(
+                "Failed to connect to backend".into(),
+            ))
+        }
     }
 }
 
