@@ -10,7 +10,7 @@ pub(crate) struct BackendNode {
 }
 
 impl Node for BackendNode {
-    fn name(&self) -> &Arc<str> {
+    fn name(&self) -> &str {
         &self.name
     }
 
@@ -18,7 +18,7 @@ impl Node for BackendNode {
         let protocol = payload.protocol();
         match self.base_url.get(protocol.name()) {
             UrlResult::Native(url) => Ok(Route {
-                nodes: vec![self.name.clone()],
+                nodes: vec![],
                 backend: Backend {
                     protocol,
                     base_url: url.into(),
@@ -26,7 +26,7 @@ impl Node for BackendNode {
                 },
             }),
             UrlResult::Foreign(protocol, url) => Ok(Route {
-                nodes: vec![self.name.clone()],
+                nodes: vec![],
                 backend: Backend {
                     protocol: match protocol {
                         "openai" => Protocol::OpenAI,

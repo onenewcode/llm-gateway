@@ -12,7 +12,7 @@ pub struct InputNode {
 }
 
 impl Node for InputNode {
-    fn name(&self) -> &Arc<str> {
+    fn name(&self) -> &str {
         &self.name
     }
 
@@ -21,7 +21,7 @@ impl Node for InputNode {
         match self.models.read().unwrap().get(model) {
             Some(node) => match node.route(payload) {
                 Ok(mut route) => {
-                    route.nodes.push(self.name.clone());
+                    route.nodes.push(node.clone());
                     Ok(route)
                 }
                 Err(e) => Err(e),
@@ -33,7 +33,7 @@ impl Node for InputNode {
     fn replace_connections(&self, nodes: &HashMap<&str, Arc<dyn Node>>) {
         for node in self.models.write().unwrap().values_mut() {
             *node = nodes
-                .get(&**node.name())
+                .get(node.name())
                 .unwrap_or_else(|| panic!("{}: successor {} not fount", self.name, node.name()))
                 .clone()
         }

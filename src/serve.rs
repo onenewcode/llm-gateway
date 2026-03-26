@@ -94,7 +94,7 @@ fn method_not_allowed(allow: Method) -> Response<BoxBody> {
 /// 处理单个 HTTP 请求
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
-    input_node: &InputNode,
+    input_node: &Arc<InputNode>,
     client: HttpsClient,
 ) -> Result<Response<BoxBody>, GatewayError> {
     // 处理 /v1/models 端点 (GET only)
@@ -113,9 +113,14 @@ async fn handle_request(
     match input_node.route(&payload) {
         Ok(Route { mut nodes, backend }) => {
             // 日志记录路由成功路径
-            nodes.reverse();
-            let path_str = nodes.join(" -> ");
-            log::info!("Routing path: {path_str}");
+            nodes.push(input_node.clone());
+            let mut path = String::new();
+            for node in nodes.iter().rev() {
+                path.push_str(node.name());
+                path.push_str("->");
+            }
+            let path = path.strip_suffix("->").unwrap();
+            log::info!("Routing path: {path}");
 
             if payload.protocol() == backend.protocol {
                 forward_to_backend(payload, backend, client).await

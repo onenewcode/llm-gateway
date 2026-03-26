@@ -49,7 +49,7 @@ impl RoutePayload {
 pub type RouteResult = Result<Route, RouteError>;
 
 pub struct Route {
-    nodes: Vec<Arc<str>>,
+    nodes: Vec<Arc<dyn Node>>,
     backend: Backend,
 }
 
@@ -66,7 +66,7 @@ pub enum RouteError {
 /// 节点 Trait
 pub trait Node: Send + Sync {
     /// 节点名字
-    fn name(&self) -> &Arc<str>;
+    fn name(&self) -> &str;
     /// 执行路由
     fn route(&self, payload: &RoutePayload) -> RouteResult;
     /// 替换连接关系
@@ -79,7 +79,7 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
     struct PlaceHolder(Arc<str>);
 
     impl Node for PlaceHolder {
-        fn name(&self) -> &Arc<str> {
+        fn name(&self) -> &str {
             &self.0
         }
         fn route(&self, _: &RoutePayload) -> RouteResult {

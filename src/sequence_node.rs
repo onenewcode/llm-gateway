@@ -10,7 +10,7 @@ pub(crate) struct SequenceNode {
 }
 
 impl Node for SequenceNode {
-    fn name(&self) -> &Arc<str> {
+    fn name(&self) -> &str {
         &self.name
     }
 
@@ -18,7 +18,7 @@ impl Node for SequenceNode {
         for successor in &*self.successors.read().unwrap() {
             match successor.route(payload) {
                 Ok(mut route) => {
-                    route.nodes.push(self.name.clone());
+                    route.nodes.push(successor.clone());
                     return Ok(route);
                 }
                 Err(e) => match e {
@@ -31,7 +31,7 @@ impl Node for SequenceNode {
 
     fn replace_connections(&self, nodes: &HashMap<&str, Arc<dyn Node>>) {
         for node in &mut *self.successors.write().unwrap() {
-            *node = nodes.get(&**node.name()).unwrap().clone()
+            *node = nodes.get(node.name()).unwrap().clone()
         }
     }
 }
