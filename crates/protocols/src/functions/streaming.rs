@@ -4,8 +4,8 @@ use serde_json::{Value as Json, json};
 
 /// Streaming collector trait for protocol conversion
 pub trait StreamingCollector: Send + Sync {
-    /// Process an SSE message and return converted messages (if any)
-    fn process(&mut self, msg: SseMessage) -> ProtocolResult<Option<Vec<SseMessage>>>;
+    /// Process an SSE message and return converted messages
+    fn process(&mut self, msg: SseMessage) -> ProtocolResult<Vec<SseMessage>>;
 }
 
 /// OpenAI to Anthropic streaming converter
@@ -21,12 +21,12 @@ pub struct OpenaiToAnthropic {
 }
 
 impl StreamingCollector for OpenaiToAnthropic {
-    fn process(&mut self, msg: SseMessage) -> ProtocolResult<Option<Vec<SseMessage>>> {
+    fn process(&mut self, msg: SseMessage) -> ProtocolResult<Vec<SseMessage>> {
         // Handle [DONE] marker - if already finished, return empty
         if msg.is_done() {
             if self.finished {
                 // Already sent end-of-stream events via finish_reason, nothing to do
-                return Ok(None);
+                return Ok(Vec::new());
             }
             // Otherwise generate end-of-stream events (e.g., when OpenAI stream ends without finish_reason)
             let mut ans = Vec::new();
@@ -62,7 +62,7 @@ impl StreamingCollector for OpenaiToAnthropic {
             ));
 
             self.finished = true;
-            return Ok(Some(ans));
+            return Ok(ans);
         }
 
         let chunk: Json = serde_json::from_str(&msg.data)?;
@@ -208,7 +208,7 @@ impl StreamingCollector for OpenaiToAnthropic {
             }
         }
 
-        Ok(Some(ans))
+        Ok(ans)
     }
 }
 
@@ -324,7 +324,7 @@ pub struct AnthropicToOpenai {
 }
 
 impl StreamingCollector for AnthropicToOpenai {
-    fn process(&mut self, msg: SseMessage) -> ProtocolResult<Option<Vec<SseMessage>>> {
+    fn process(&mut self, msg: SseMessage) -> ProtocolResult<Vec<SseMessage>> {
         let event: Json = serde_json::from_str(&msg.data)?;
 
         let obj = event.as_object().ok_or_else(|| {
@@ -337,7 +337,7 @@ impl StreamingCollector for AnthropicToOpenai {
             .ok_or_else(|| ProtocolError::InvalidStreamEvent("Event missing type".to_string()))?;
 
         match event_type {
-            "ping" => Ok(None),
+            "ping" => Ok(Vec::new()),
             "message_start" => self.handle_message_start(obj),
             "content_block_start" => self.handle_content_block_start(obj),
             "content_block_delta" => self.handle_content_block_delta(obj),
@@ -355,7 +355,7 @@ impl AnthropicToOpenai {
     fn handle_message_start(
         &mut self,
         obj: &serde_json::Map<String, Json>,
-    ) -> ProtocolResult<Option<Vec<SseMessage>>> {
+    ) -> ProtocolResult<Vec<SseMessage>> {
         if let Some(message) = obj.get("message").and_then(|v| v.as_object()) {
             if let Some(id) = message.get("id").and_then(|v| v.as_str()) {
                 self.id = Some(id.to_string());
@@ -377,13 +377,13 @@ impl AnthropicToOpenai {
             }
         }
         // No output for message_start
-        Ok(None)
+        Ok(Vec::new())
     }
 
     fn handle_content_block_start(
         &mut self,
         obj: &serde_json::Map<String, Json>,
-    ) -> ProtocolResult<Option<Vec<SseMessage>>> {
+    ) -> ProtocolResult<Vec<SseMessage>> {
         if let Some(content_block) = obj.get("content_block").and_then(|v| v.as_object()) {
             let block_type = content_block
                 .get("type")
@@ -406,13 +406,13 @@ impl AnthropicToOpenai {
             }
         }
         // No output for content_block_start
-        Ok(None)
+        Ok(Vec::new())
     }
 
     fn handle_content_block_delta(
         &mut self,
         obj: &serde_json::Map<String, Json>,
-    ) -> ProtocolResult<Option<Vec<SseMessage>>> {
+    ) -> ProtocolResult<Vec<SseMessage>> {
         if let Some(delta) = obj.get("delta").and_then(|v| v.as_object()) {
             let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -420,23 +420,23 @@ impl AnthropicToOpenai {
                 "text_delta" => {
                     if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
                         // Generate OpenAI chunk with delta.content
-                        return Ok(Some(vec![SseMessage::new(&self.create_chunk(
+                        return Ok(vec![SseMessage::new(&self.create_chunk(
                             None,
                             Some(text),
                             None,
                             None,
-                        ))]));
+                        ))]);
                     }
                 }
                 "thinking_delta" => {
                     if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
                         // Generate OpenAI chunk with reasoning_content
-                        return Ok(Some(vec![SseMessage::new(&self.create_chunk(
+                        return Ok(vec![SseMessage::new(&self.create_chunk(
                             None,
                             None,
                             None,
                             Some(thinking),
-                        ))]));
+                        ))]);
                     }
                 }
                 "input_json_delta" => {
@@ -449,13 +449,13 @@ impl AnthropicToOpenai {
                 _ => {}
             }
         }
-        Ok(None)
+        Ok(Vec::new())
     }
 
     fn handle_content_block_stop(
         &mut self,
         _obj: &serde_json::Map<String, Json>,
-    ) -> ProtocolResult<Option<Vec<SseMessage>>> {
+    ) -> ProtocolResult<Vec<SseMessage>> {
         // If this was a tool_use block, generate tool_calls chunk
         if self.current_block_type.as_deref() == Some("tool_use") {
             let tool_id = self.tool_id.take().unwrap_or_default();
@@ -468,16 +468,16 @@ impl AnthropicToOpenai {
                 Some((tool_id.as_str(), tool_name.as_str(), tool_input.as_str())),
                 None,
             );
-            return Ok(Some(vec![SseMessage::new(&tool_calls_chunk)]));
+            return Ok(vec![SseMessage::new(&tool_calls_chunk)]);
         }
         self.current_block_type = None;
-        Ok(None)
+        Ok(Vec::new())
     }
 
     fn handle_message_delta(
         &mut self,
         obj: &serde_json::Map<String, Json>,
-    ) -> ProtocolResult<Option<Vec<SseMessage>>> {
+    ) -> ProtocolResult<Vec<SseMessage>> {
         // Extract stop_reason
         let stop_reason = obj
             .get("delta")
@@ -507,17 +507,17 @@ impl AnthropicToOpenai {
         }
 
         // Generate OpenAI chunk with finish_reason and usage
-        Ok(Some(vec![SseMessage::new(&self.create_chunk(
+        Ok(vec![SseMessage::new(&self.create_chunk(
             Some(finish_reason),
             None,
             None,
             None,
-        ))]))
+        ))])
     }
 
-    fn handle_message_stop(&mut self) -> ProtocolResult<Option<Vec<SseMessage>>> {
+    fn handle_message_stop(&mut self) -> ProtocolResult<Vec<SseMessage>> {
         // Generate [DONE] marker
-        Ok(Some(vec![SseMessage::done()]))
+        Ok(vec![SseMessage::done()])
     }
 
     fn create_chunk(
@@ -611,8 +611,7 @@ mod tests {
         let events = converter.process(SseMessage::new(&chunk)).unwrap();
 
         // Should generate message_start and content_block_start
-        assert!(events.is_some());
-        let events = events.unwrap();
+        assert!(!events.is_empty());
         assert!(
             events
                 .iter()
@@ -647,8 +646,7 @@ mod tests {
         let events = converter.process(SseMessage::new(&chunk)).unwrap();
 
         // Should generate content_block_delta with text_delta
-        assert!(events.is_some());
-        let events = events.unwrap();
+        assert!(!events.is_empty());
         assert!(
             events
                 .iter()
@@ -681,8 +679,7 @@ mod tests {
         let events = converter.process(SseMessage::new(&chunk)).unwrap();
 
         // Should generate message_delta with stop_reason: end_turn
-        assert!(events.is_some());
-        let events = events.unwrap();
+        assert!(!events.is_empty());
         assert!(
             events
                 .iter()
@@ -712,15 +709,12 @@ mod tests {
         // Send [DONE] marker - should generate exactly the three Anthropic ending events
         let result = converter.process(SseMessage::done()).unwrap();
 
-        assert!(result.is_some());
-        let events = result.unwrap();
-
         // Must generate exactly 3 events
-        assert_eq!(events.len(), 3, "Should generate exactly 3 events");
+        assert_eq!(result.len(), 3, "Should generate exactly 3 events");
 
         // Event 1: content_block_stop
-        assert_eq!(events[0].event.as_deref(), Some("content_block_stop"));
-        let data1: Json = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(result[0].event.as_deref(), Some("content_block_stop"));
+        let data1: Json = serde_json::from_str(&result[0].data).unwrap();
         assert_eq!(
             data1,
             json!({
@@ -730,8 +724,8 @@ mod tests {
         );
 
         // Event 2: message_delta - per Anthropic spec, usage only has output_tokens
-        assert_eq!(events[1].event.as_deref(), Some("message_delta"));
-        let data2: Json = serde_json::from_str(&events[1].data).unwrap();
+        assert_eq!(result[1].event.as_deref(), Some("message_delta"));
+        let data2: Json = serde_json::from_str(&result[1].data).unwrap();
         assert_eq!(
             data2,
             json!({
@@ -747,8 +741,8 @@ mod tests {
         );
 
         // Event 3: message_stop
-        assert_eq!(events[2].event.as_deref(), Some("message_stop"));
-        let data3: Json = serde_json::from_str(&events[2].data).unwrap();
+        assert_eq!(result[2].event.as_deref(), Some("message_stop"));
+        let data3: Json = serde_json::from_str(&result[2].data).unwrap();
         assert_eq!(data3, json!({"type": "message_stop"}));
     }
 
@@ -778,10 +772,8 @@ mod tests {
             })))
             .unwrap();
 
-        assert!(result.is_some());
-        let events = result.unwrap();
         assert_eq!(
-            events.len(),
+            result.len(),
             3,
             "finish_reason should generate 3 end events"
         );
@@ -789,7 +781,7 @@ mod tests {
         // Now send [DONE] - should NOT generate duplicate events
         let result = converter.process(SseMessage::done()).unwrap();
         assert!(
-            result.is_none(),
+            result.is_empty(),
             "[DONE] after finish_reason should not generate extra events"
         );
     }
@@ -819,8 +811,8 @@ mod tests {
 
         let chunk = converter.process(SseMessage::new(&event)).unwrap();
 
-        // Should return None (no output yet)
-        assert!(chunk.is_none());
+        // Should return empty Vec (no output yet)
+        assert!(chunk.is_empty());
     }
 
     #[test]
@@ -850,9 +842,8 @@ mod tests {
         let chunk = converter.process(SseMessage::new(&event)).unwrap();
 
         // Should generate OpenAI chunk with delta.content
-        assert!(chunk.is_some());
-        let lines = chunk.unwrap();
-        assert!(lines.iter().any(|e| {
+        assert!(!chunk.is_empty());
+        assert!(chunk.iter().any(|e| {
             let data: Json = serde_json::from_str(&e.data).unwrap();
             data["choices"][0]["delta"]["content"] == "Hello"
         }));
@@ -886,9 +877,8 @@ mod tests {
         let chunk = converter.process(SseMessage::new(&event)).unwrap();
 
         // Should generate OpenAI chunk with finish_reason: stop
-        assert!(chunk.is_some());
-        let lines = chunk.unwrap();
-        assert!(lines.iter().any(|e| {
+        assert!(!chunk.is_empty());
+        assert!(chunk.iter().any(|e| {
             let data: Json = serde_json::from_str(&e.data).unwrap();
             data["choices"][0]["finish_reason"] == "stop"
         }));
@@ -928,8 +918,7 @@ mod tests {
         let events = converter.process(SseMessage::new(&chunk)).unwrap();
 
         // Should generate tool_use content_block_start and input_json_delta
-        assert!(events.is_some());
-        let events = events.unwrap();
+        assert!(!events.is_empty());
         assert!(
             events
                 .iter()
@@ -987,10 +976,9 @@ mod tests {
             .unwrap();
 
         // Should have tool_calls in chunk
-        assert!(chunk.is_some());
-        let lines = chunk.unwrap();
+        assert!(!chunk.is_empty());
         assert!(
-            lines
+            chunk
                 .iter()
                 .any(|e| e.data.to_string().contains("\"tool_calls\""))
         );
@@ -1028,9 +1016,8 @@ mod tests {
             })))
             .unwrap();
 
-        assert!(result.is_some());
-        let lines = result.unwrap();
-        assert!(lines.iter().any(|e| e.is_done()));
+        assert!(!result.is_empty());
+        assert!(result.iter().any(|e| e.is_done()));
     }
 
     // ============================================================================
@@ -1064,11 +1051,10 @@ mod tests {
 
         let chunk = converter.process(SseMessage::new(&event)).unwrap();
 
-        assert!(chunk.is_some());
-        let lines = chunk.unwrap();
+        assert!(!chunk.is_empty());
 
         // Verify finish_reason is JSON null, not string "null"
-        let data_line = lines
+        let data_line = chunk
             .iter()
             .find(|e| !serde_json::from_str::<Json>(&e.data).unwrap().is_null())
             .map(|e| &e.data)
@@ -1108,10 +1094,10 @@ mod tests {
         });
 
         let events = converter.process(SseMessage::new(&chunk)).unwrap();
-        assert!(events.is_some());
+        assert!(!events.is_empty());
 
         // Find message_delta event and verify usage is inside delta
-        let message_delta_data = events.unwrap().iter().find_map(|e| {
+        let message_delta_data = events.iter().find_map(|e| {
             let data: Json = serde_json::from_str(&e.data).unwrap();
             if data.get("type").and_then(|v| v.as_str()) == Some("message_delta") {
                 Some(e.data.clone())
@@ -1161,11 +1147,10 @@ mod tests {
 
         let chunk = converter.process(SseMessage::new(&event)).unwrap();
 
-        assert!(chunk.is_some());
-        let lines = chunk.unwrap();
+        assert!(!chunk.is_empty());
 
         // Verify created field is not 0
-        let data_line = lines
+        let data_line = chunk
             .iter()
             .find(|e| !serde_json::from_str::<Json>(&e.data).unwrap().is_null())
             .map(|e| &e.data)
@@ -1217,12 +1202,11 @@ mod tests {
         let chunk = converter.process(SseMessage::new(&event)).unwrap();
 
         // Should generate OpenAI chunk with reasoning_content
-        assert!(chunk.is_some());
-        let lines = chunk.unwrap();
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].event.is_none()); // OpenAI chunks don't have event field
+        assert!(!chunk.is_empty());
+        assert_eq!(chunk.len(), 1);
+        assert!(chunk[0].event.is_none()); // OpenAI chunks don't have event field
 
-        let data: Json = serde_json::from_str(&lines[0].data).unwrap();
+        let data: Json = serde_json::from_str(&chunk[0].data).unwrap();
         assert_eq!(
             data["choices"][0]["delta"]["reasoning_content"],
             "Let me analyze this step by step..."
@@ -1251,8 +1235,7 @@ mod tests {
         let events = converter.process(SseMessage::new(&chunk)).unwrap();
 
         // Should generate thinking content_block_delta
-        assert!(events.is_some());
-        let events = events.unwrap();
+        assert!(!events.is_empty());
         assert_eq!(events.len(), 1);
 
         // Check event type

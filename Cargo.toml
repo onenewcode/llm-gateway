@@ -25,6 +25,7 @@ hyper-rustls = { version = "0.27", features = ["http1", "rustls-native-certs"] }
 http = "1"
 http-body-util = "0.1"
 tokio = { version = "1.50", features = ["rt-multi-thread", "net"] }
+futures = "0.3"
 
 log = "0.4"
 flexi_logger = "0.31"

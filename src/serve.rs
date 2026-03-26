@@ -3,17 +3,19 @@ use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HOST};
 use http::{HeaderName, StatusCode, Uri};
 use http_body_util::BodyExt;
 use http_body_util::Full;
-use hyper::body::{Bytes, Frame};
+use hyper::body::{Bytes, Frame, Incoming};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioIo;
 use llm_gateway_protocols::streaming::{self, StreamingCollector};
-use llm_gateway_protocols::{Protocol, SseCollector, request};
+use llm_gateway_protocols::{Protocol, SseCollector, SseMessage, request};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::env;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fmt::Write, sync::Arc};
 use tokio::net::TcpListener;
 
@@ -188,7 +190,6 @@ async fn forward_to_backend(
     }
 }
 
-/// 直接转发请求到后端，支持 SSE 流式响应
 async fn forward_to_foreign(
     payload: RoutePayload,
     backend: Backend,
@@ -248,7 +249,7 @@ async fn forward_to_foreign(
         .body(Full::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
 
-    let mut converter: Box<dyn StreamingCollector> = match (protocol, backend.protocol) {
+    let converter: Box<dyn StreamingCollector> = match (protocol, backend.protocol) {
         (Protocol::OpenAI, Protocol::Anthropic) => {
             Box::new(streaming::AnthropicToOpenai::default())
         }
@@ -260,36 +261,106 @@ async fn forward_to_foreign(
 
     // 发送请求到后端
     match client.request(forward_req).await {
-        Ok(response) => {
-            let (parts, body) = response.into_parts();
-
-            let mut collector = SseCollector::new();
-            let mapped = body.map_frame(move |f| {
-                let msgs = collector.collect(f.data_ref().unwrap()).unwrap();
-                let mut ans = String::new();
-                for msg in msgs {
-                    log::debug!("in: {msg}");
-                    if let Some(out) = converter.process(msg).unwrap() {
-                        for line in out {
-                            write!(ans, "{line}").unwrap()
-                        }
-                    }
-                }
-                log::debug!("out: {ans}");
-                Frame::data(Bytes::from(ans))
-            });
-
-            // 流式转发后端响应体
-            Ok(Response::from_parts(
-                parts,
-                mapped
-                    .map_err(std::io::Error::other)
-                    .map_err(GatewayError::IoError)
-                    .boxed(),
-            ))
-        }
+        Ok(response) => Ok(forward_foreign_response(response, converter)),
         Err(_) => Err(GatewayError::BackendRequestFailed(
             "Failed to connect to backend".into(),
         )),
     }
+}
+
+/// 使用 Stream 方式处理协议转换，错误时真正关闭流
+fn forward_foreign_response(
+    response: Response<Incoming>,
+    converter: Box<dyn StreamingCollector>,
+) -> Response<BoxBody> {
+    use futures::{StreamExt, TryStreamExt};
+
+    let (parts, body) = response.into_parts();
+
+    // 将 Body 转换为 Stream，将 hyper::Error 映射为 std::io::Error
+    let data_stream = body.into_data_stream().map_err(std::io::Error::other);
+
+    // 使用 Mutex 实现线程安全的内部可变性
+    let collector = Mutex::new(SseCollector::new());
+    let converter = Mutex::new(converter);
+    let error_occurred = Arc::new(AtomicBool::new(false));
+
+    // 创建一个 Stream，在错误时立即停止
+    let processed_stream = data_stream
+        .try_take_while({
+            let error_occurred = error_occurred.clone();
+            move |_| {
+                let should_continue = !error_occurred.load(Ordering::Relaxed);
+                futures::future::ready(Ok::<_, std::io::Error>(should_continue))
+            }
+        })
+        .map({
+            let error_occurred = error_occurred.clone();
+            move |result| match result {
+                Ok(bytes) => Ok(process_frame(
+                    &bytes,
+                    &collector,
+                    &converter,
+                    &error_occurred,
+                )),
+                Err(e) => Err(e),
+            }
+        });
+
+    // 将 Stream 转换回 Body
+    let new_body = http_body_util::StreamBody::new(processed_stream);
+    let new_body = BodyExt::map_err(new_body, GatewayError::IoError);
+
+    Response::from_parts(parts, BodyExt::boxed(new_body))
+}
+
+/// 处理单个数据帧，返回 SSE 格式的输出
+fn process_frame(
+    bytes: &Bytes,
+    collector: &Mutex<SseCollector>,
+    converter: &Mutex<Box<dyn StreamingCollector>>,
+    error_occurred: &AtomicBool,
+) -> Frame<Bytes> {
+    let ans = match collector.lock().unwrap().collect(bytes) {
+        Ok(msgs) => {
+            let mut ans = String::new();
+            for msg in msgs {
+                log::debug!("in: {msg}");
+                let mut converter = converter.lock().unwrap();
+                match converter.process(msg) {
+                    Ok(out) => {
+                        for line in out {
+                            let _ = write!(ans, "{line}");
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Protocol conversion error: {e}");
+                        error_occurred.store(true, Ordering::Relaxed);
+                        let error_data = serde_json::json!({
+                            "error": {
+                                "message": format!("Protocol conversion failed: {e}"),
+                                "type": "protocol_conversion_error"
+                            }
+                        });
+                        let _ = write!(ans, "{}", SseMessage::new(&error_data));
+                        break;
+                    }
+                }
+            }
+            ans
+        }
+        Err(e) => {
+            log::error!("SSE parsing error: {e}");
+            error_occurred.store(true, Ordering::Relaxed);
+            let error_data = serde_json::json!({
+                "error": {
+                    "message": format!("SSE parsing failed: {e}"),
+                    "type": "sse_parsing_error"
+                }
+            });
+            SseMessage::new(&error_data).to_string()
+        }
+    };
+    log::debug!("out: {ans}");
+    Frame::data(Bytes::from(ans))
 }
