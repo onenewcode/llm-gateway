@@ -74,10 +74,8 @@ pub type RouteResult = Result<Route, RouteError>;
 
 /// 路由结果，包含路由路径和后端信息
 pub struct Route {
-    /// 路由路径上的节点列表
-    nodes: Vec<Arc<dyn Node>>,
-    /// 目标后端
-    backend: Backend,
+    pub nodes: Vec<Arc<dyn Node>>,
+    pub backend: Backend,
 }
 
 impl Route {
@@ -164,6 +162,7 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
                         })
                         .collect(),
                 ),
+                alias: n.alias.clone(),
             })),
             ConfigNode::Virtual(n) => match n {
                 VirtualNode::Sequence(successors) => {

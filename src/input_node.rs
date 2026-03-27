@@ -19,6 +19,8 @@ pub struct InputNode {
     pub(super) port: u16,
     /// 模型名称到下游节点的映射
     pub(super) models: RwLock<HashMap<Arc<str>, Arc<dyn Node>>>,
+    /// 模型别名映射：别名 -> 实际模型名
+    pub(super) alias: HashMap<String, String>,
 }
 
 impl Node for InputNode {
@@ -30,6 +32,7 @@ impl Node for InputNode {
     /// 根据请求中的模型名称路由到对应的下游节点
     fn route(&self, payload: &RoutePayload) -> RouteResult {
         let model = payload.body.get("model").and_then(Value::as_str).unwrap();
+
         match self.models.read().unwrap().get(model) {
             Some(node) => match node.route(payload) {
                 Ok(mut route) => {
@@ -47,7 +50,7 @@ impl Node for InputNode {
         for node in self.models.write().unwrap().values_mut() {
             *node = nodes
                 .get(node.name())
-                .unwrap_or_else(|| panic!("{}: successor {} not fount", self.name, node.name()))
+                .unwrap_or_else(|| panic!("{}: successor {} not found", self.name, node.name()))
                 .clone()
         }
     }

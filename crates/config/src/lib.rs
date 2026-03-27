@@ -128,11 +128,58 @@ impl FromStr for GatewayConfig {
                         .map(|arr| {
                             arr.iter()
                                 .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
+                                .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
 
-                    nodes.insert(name.clone().into(), Node::Input(InputNode { port, models }));
+                    // 验证 models 内部无重复
+                    let mut model_set = std::collections::HashSet::new();
+                    for model in &models {
+                        if !model_set.insert(model.as_str()) {
+                            return Err(ConfigParseError::DuplicateName(format!(
+                                "input.{name}.models 中重复的模型名：{model}"
+                            )));
+                        }
+                    }
+
+                    // 解析 alias 字段（可选，默认为空映射）
+                    let alias = node_table
+                        .get("alias")
+                        .and_then(|v| v.as_table())
+                        .map(|table| {
+                            table
+                                .iter()
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                                .collect::<HashMap<_, _>>()
+                        })
+                        .unwrap_or_default();
+
+                    // 验证 alias 键与 models 无重复（别名不能与模型名相同）
+                    for alias_key in alias.keys() {
+                        if model_set.contains(alias_key.as_str()) {
+                            return Err(ConfigParseError::DuplicateName(format!(
+                                "input.{name}.alias 中的别名 '{alias_key}' 与 models 中的模型名重复"
+                            )));
+                        }
+                    }
+
+                    // 验证 alias 的值（映射目标）都在 models 中
+                    for (alias_key, target_model) in &alias {
+                        if !model_set.contains(target_model.as_str()) {
+                            return Err(ConfigParseError::ParseError(format!(
+                                "input.{name}.alias 中的别名 '{alias_key}' 映射到不存在的模型 '{target_model}'"
+                            )));
+                        }
+                    }
+
+                    nodes.insert(
+                        name.clone().into(),
+                        Node::Input(InputNode {
+                            port,
+                            models,
+                            alias,
+                        }),
+                    );
                 }
             }
         }
@@ -311,6 +358,111 @@ api-key = "$ALIYUN_API_KEY"
                 assert_eq!(backend.api_key, Some("$ALIYUN_API_KEY".to_string()));
             }
             _ => panic!("Expected Backend node"),
+        }
+    }
+
+    /// 测试输入节点别名解析
+    #[test]
+    fn test_parse_input_node_with_alias() {
+        let toml_str = r#"
+[input.service]
+port = 8000
+models = ["qwen3.5-35b-a3b", "qwen3.5-122b-a10b"]
+
+[input.service.alias]
+"data/Qwen3.5-35B-A3B" = "qwen3.5-35b-a3b"
+"Qwen3.5-122B-A10B" = "qwen3.5-122b-a10b"
+"#;
+
+        let result = GatewayConfig::from_str(toml_str);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+
+        match &config.nodes["service"] {
+            Node::Input(input) => {
+                assert_eq!(input.port, 8000);
+                assert_eq!(input.models.len(), 2);
+                assert_eq!(input.alias.len(), 2);
+                assert_eq!(
+                    input.alias.get("data/Qwen3.5-35B-A3B"),
+                    Some(&"qwen3.5-35b-a3b".to_string())
+                );
+                assert_eq!(
+                    input.alias.get("Qwen3.5-122B-A10B"),
+                    Some(&"qwen3.5-122b-a10b".to_string())
+                );
+            }
+            _ => panic!("Expected Input node"),
+        }
+    }
+
+    /// 测试 models 内部重复检测
+    #[test]
+    fn test_error_on_duplicate_model_name() {
+        let toml_str = r#"
+[input.service]
+port = 8000
+models = ["model-a", "model-b", "model-a"]
+"#;
+
+        let result = GatewayConfig::from_str(toml_str);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            crate::error::Error::DuplicateName(msg) => {
+                assert!(msg.contains("model-a"));
+                assert!(msg.contains("models"));
+            }
+            _ => panic!("Expected DuplicateName error for duplicate model"),
+        }
+    }
+
+    /// 测试别名与模型名重复检测
+    #[test]
+    fn test_error_on_alias_duplicate_with_model() {
+        let toml_str = r#"
+[input.service]
+port = 8000
+models = ["qwen3.5-35b-a3b", "qwen3.5-122b-a10b"]
+
+[input.service.alias]
+"qwen3.5-35b-a3b" = "qwen3.5-122b-a10b"
+"#;
+
+        let result = GatewayConfig::from_str(toml_str);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            crate::error::Error::DuplicateName(msg) => {
+                assert!(msg.contains("qwen3.5-35b-a3b"));
+                assert!(msg.contains("alias"));
+                assert!(msg.contains("models"));
+            }
+            _ => panic!("Expected DuplicateName error for alias-model conflict"),
+        }
+    }
+
+    /// 测试别名映射目标不存在
+    #[test]
+    fn test_error_on_alias_target_not_in_models() {
+        let toml_str = r#"
+[input.service]
+port = 8000
+models = ["qwen3.5-35b-a3b"]
+
+[input.service.alias]
+"data/Qwen3.5-35B-A3B" = "nonexistent-model"
+"#;
+
+        let result = GatewayConfig::from_str(toml_str);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            crate::error::Error::ParseError(msg) => {
+                assert!(msg.contains("nonexistent-model"));
+                assert!(msg.contains("alias"));
+            }
+            _ => panic!("Expected ParseError for alias target not in models"),
         }
     }
 }

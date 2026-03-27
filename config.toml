@@ -5,6 +5,11 @@ port = 9000
 # 输入节点的后继是模型节点，根据协议中的 `model` 字段路由到指定名字的后继
 models = ["qwen3.5-35b-a3b", "qwen3.5-122b-a10b"]
 
+[input.service.alias]
+"data/Qwen3.5-35B-A3B" = "qwen3.5-35b-a3b"
+"Qwen3.5-35B-A3B" = "qwen3.5-35b-a3b"
+"Qwen3.5-122B-A10B" = "qwen3.5-122b-a10b"
+
 # 这是一个虚节点
 [node."qwen3.5-35b-a3b"]
 # 虚节点路由策略是顺序尝试，尝试的顺序如下

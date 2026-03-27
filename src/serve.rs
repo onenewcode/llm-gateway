@@ -138,7 +138,18 @@ async fn handle_request(
 
     let start_time = Instant::now();
     let method = req.method().clone();
-    let payload = RoutePayload::new(req).await?;
+    let mut payload = RoutePayload::new(req).await?;
+
+    // 如有别名映射，在路由前直接替换请求体中的 model 字段
+    if let Some(model) = payload
+        .body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .and_then(|m| input_node.alias.get(m))
+    {
+        payload.body["model"] = json!(model);
+    }
+
     let mut retry = 0;
     loop {
         match input_node.route(&payload) {
@@ -238,7 +249,7 @@ async fn handle_route_success(
     route: &Route,
     client: HttpsClient,
 ) -> Result<Response<BoxBody>, GatewayError> {
-    let Route { nodes, backend } = route;
+    let Route { nodes, backend, .. } = route;
     let result = if payload.protocol() == backend.protocol {
         forward_to_backend(payload, backend, client).await
     } else {

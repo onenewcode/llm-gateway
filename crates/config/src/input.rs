@@ -5,18 +5,23 @@
 //! - 接收客户端请求
 //! - 根据模型名称路由到对应的虚拟节点或后端
 
+use std::collections::HashMap;
+
 /// 输入节点结构
 ///
 /// # 字段
 ///
 /// * `port` - 监听端口号
 /// * `models` - 支持的模型列表，请求将根据模型名路由
+/// * `alias` - 模型别名映射：别名 -> 实际模型名
 #[derive(Clone, Debug)]
 pub struct InputNode {
     /// 监听端口号
     pub port: u16,
     /// 支持的模型列表
     pub models: Vec<String>,
+    /// 模型别名映射：别名 -> 实际模型名
+    pub alias: HashMap<String, String>,
 }
 
 #[cfg(test)]
@@ -41,6 +46,7 @@ models = ["qwen3.5-35b-a3b", "kimi-k2.5"]
             crate::Node::Input(input) => {
                 assert_eq!(input.port, 8000);
                 assert_eq!(input.models, vec!["qwen3.5-35b-a3b", "kimi-k2.5"]);
+                assert!(input.alias.is_empty());
             }
             _ => panic!("Expected Input node"),
         }
@@ -61,6 +67,7 @@ models = ["qwen3.5-35b-a3b", "qwen3.5-122b-a10b", "kimi-k2.5"]
         match &config.nodes["service"] {
             crate::Node::Input(input) => {
                 assert_eq!(input.models.len(), 3);
+                assert!(input.alias.is_empty());
             }
             _ => panic!("Expected Input node"),
         }
