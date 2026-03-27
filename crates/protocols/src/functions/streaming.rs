@@ -2,13 +2,13 @@ use super::{ProtocolError, ProtocolResult};
 use crate::SseMessage;
 use serde_json::{Value as Json, json};
 
-/// Streaming collector trait for protocol conversion
+/// 流式响应收集器 trait，用于协议转换
 pub trait StreamingCollector: Send + Sync {
-    /// Process an SSE message and return converted messages
+    /// 处理 SSE 消息并返回转换后的消息
     fn process(&mut self, msg: SseMessage) -> ProtocolResult<Vec<SseMessage>>;
 }
 
-/// OpenAI to Anthropic streaming converter
+/// OpenAI 到 Anthropic 流式转换器
 #[derive(Default)]
 pub struct OpenaiToAnthropic {
     id: Option<String>,

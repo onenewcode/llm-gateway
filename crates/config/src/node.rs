@@ -14,8 +14,11 @@ use crate::{BackendNode, InputNode};
 /// - [`Backend`](Node::Backend) - 后端节点，实际服务
 #[derive(Clone, Debug)]
 pub enum Node {
+    /// 输入节点
     Input(InputNode),
+    /// 虚拟节点
     Virtual(VirtualNode),
+    /// 后端节点
     Backend(BackendNode),
 }
 
@@ -25,6 +28,7 @@ pub enum Node {
 /// - [`Sequence`](VirtualNode::Sequence) - 顺序尝试，按列表顺序尝试后端
 #[derive(Clone, Debug)]
 pub enum VirtualNode {
+    /// 顺序尝试路由
     Sequence(Vec<String>),
 }
 

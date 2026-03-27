@@ -1,10 +1,12 @@
+//! 路由事件定义模块
+
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
 /// 路由事件，记录每一次请求的路由过程
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RoutingEvent {
-    /// 毫秒级 Unix 时间戳 (i64 for rusqlite)
+    /// 毫秒级 Unix 时间戳
     pub timestamp: i64,
     /// 请求来源 IPv4 地址 (u32 网络字节序)
     pub remote_addr: u32,
@@ -35,23 +37,6 @@ pub struct RoutingEvent {
 }
 
 /// 构建 `RoutingEvent` 的 Builder
-///
-/// # 示例
-///
-/// ```
-/// use llm_gateway_statistics::RoutingEventBuilder;
-///
-/// let event = RoutingEventBuilder::new(1234567890000, 9000)
-///     .remote_addr("192.168.1.1:12345".parse().unwrap())
-///     .method("POST")
-///     .path("/v1/chat/completions")
-///     .model("qwen3.5-35b")
-///     .routing_path("input->qwen3.5-35b->sglang")
-///     .backend("sglang")
-///     .success(true)
-///     .duration_ms(150)
-///     .build();
-/// ```
 pub struct RoutingEventBuilder(RoutingEvent);
 
 impl RoutingEventBuilder {

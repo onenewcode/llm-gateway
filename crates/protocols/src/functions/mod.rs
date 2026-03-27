@@ -1,15 +1,23 @@
-﻿pub mod request;
+﻿//! 协议转换函数模块
+
+pub mod request;
 pub mod response;
 pub mod streaming;
 
 use std::{cmp, error, fmt};
 
+/// 协议转换错误类型
 #[derive(Debug)]
 pub enum ProtocolError {
+    /// JSON 解析错误
     InvalidJson(serde_json::Error),
+    /// 缺少必需字段
     MissingRequiredField(String),
+    /// 转换错误
     ConversionError(String),
+    /// 无效请求
     InvalidRequest(String),
+    /// 无效流事件
     InvalidStreamEvent(String),
 }
 
@@ -46,4 +54,5 @@ impl From<serde_json::Error> for ProtocolError {
 
 impl error::Error for ProtocolError {}
 
+/// 协议转换结果类型
 pub type ProtocolResult<T> = Result<T, ProtocolError>;

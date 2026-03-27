@@ -1,3 +1,5 @@
+//! SQLite 存储实现模块
+
 use crate::event::RoutingEvent;
 use crate::query::{AggQuery, AggStats, EventFilter};
 use crate::{Result, StatisticsError};
@@ -7,6 +9,7 @@ use std::sync::{Arc, Mutex};
 /// SQLite 存储实现
 #[derive(Clone)]
 pub struct SqliteStore {
+    /// 数据库连接
     conn: Arc<Mutex<Connection>>,
 }
 
@@ -136,14 +139,14 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// 查询原始事件
+    /// 查询原始事件（内部同步方法）
     pub fn query_events_internal(&self, filter: &EventFilter) -> Result<Vec<RoutingEvent>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| StatisticsError::DatabaseError(format!("Mutex poisoned: {}", e)))?;
 
-        // 构建参数数组
+        // 构建 SQL 查询
         let mut sql_parts = Vec::new();
         let mut param_values: Vec<rusqlite::types::Value> = Vec::new();
 
@@ -197,7 +200,6 @@ impl SqliteStore {
             StatisticsError::DatabaseError(format!("Failed to prepare query: {}", e))
         })?;
 
-        // 使用 rusqlite 的 slice 参数 - 将 Value 转换为 &dyn ToSql
         let param_refs: Vec<&dyn rusqlite::ToSql> = param_values
             .iter()
             .map(|v| v as &dyn rusqlite::ToSql)
@@ -264,7 +266,7 @@ impl SqliteStore {
             .lock()
             .map_err(|e| StatisticsError::DatabaseError(format!("Mutex poisoned: {e}")))?;
 
-        // 构建参数数组
+        // 构建 SQL 查询
         let mut sql_parts = Vec::new();
         let mut param_values: Vec<rusqlite::types::Value> = Vec::new();
 
@@ -307,7 +309,6 @@ impl SqliteStore {
             StatisticsError::DatabaseError(format!("Failed to prepare query: {}", e))
         })?;
 
-        // 使用 rusqlite 的 slice 参数 - 将 Value 转换为 &dyn ToSql
         let param_refs: Vec<&dyn rusqlite::ToSql> = param_values
             .iter()
             .map(|v| v as &dyn rusqlite::ToSql)
@@ -351,7 +352,6 @@ impl SqliteStore {
     /// 插入或更新聚合统计
     ///
     /// 用于后台聚合任务的预计算结果存储
-    /// TODO: 实现后台聚合任务后使用此方法
     #[allow(dead_code)]
     fn upsert_aggregated_stats(&self, stats: &[AggStats]) -> Result<()> {
         let conn = self
@@ -408,7 +408,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// 清理过期数据
+    /// 清理过期数据（内部同步方法）
     pub fn cleanup_old_internal(&self, before: i64) -> Result<usize> {
         let conn = self
             .conn
@@ -435,7 +435,7 @@ impl SqliteStore {
         Ok(deleted_events + deleted_stats)
     }
 
-    /// 获取事件总数
+    /// 获取事件总数（内部同步方法）
     pub fn count_events_internal(&self) -> Result<i64> {
         let conn = self
             .conn
@@ -453,7 +453,7 @@ impl SqliteStore {
 }
 
 impl SqliteStore {
-    /// 记录单个事件
+    /// 记录单个事件（异步包装）
     pub async fn record_event(&self, event: &RoutingEvent) -> Result<()> {
         // 在后台任务中执行，不阻塞异步运行时
         let store = self.clone();
@@ -464,7 +464,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// 查询原始事件
+    /// 查询原始事件（异步包装）
     pub async fn query_events(&self, filter: EventFilter) -> Result<Vec<RoutingEvent>> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || store.query_events_internal(&filter))
@@ -472,7 +472,7 @@ impl SqliteStore {
             .map_err(|e| StatisticsError::DatabaseError(format!("Spawn failed: {}", e)))?
     }
 
-    /// 获取聚合统计
+    /// 获取聚合统计（异步包装）
     pub async fn get_aggregated_stats(&self, query: AggQuery) -> Result<Vec<AggStats>> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
@@ -489,7 +489,7 @@ impl SqliteStore {
         .map_err(|e| StatisticsError::DatabaseError(format!("Spawn failed: {}", e)))?
     }
 
-    /// 清理过期数据
+    /// 清理过期数据（异步包装）
     pub async fn cleanup_old(&self, before: i64) -> Result<usize> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || store.cleanup_old_internal(before))
@@ -497,7 +497,7 @@ impl SqliteStore {
             .map_err(|e| StatisticsError::DatabaseError(format!("Spawn failed: {}", e)))?
     }
 
-    /// 获取事件总数
+    /// 获取事件总数（异步包装）
     pub async fn count_events(&self) -> Result<i64> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || store.count_events_internal())

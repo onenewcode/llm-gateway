@@ -15,7 +15,9 @@ use std::collections::HashMap;
 /// * `api_key` - 可选的 API Key，用于替换请求中的密钥
 #[derive(Clone, Debug)]
 pub struct BackendNode {
+    /// 基础 URL 配置
     pub base_url: BaseUrl,
+    /// 可选的 API Key
     pub api_key: Option<String>,
 }
 
@@ -24,20 +26,21 @@ pub struct BackendNode {
 /// 支持两种配置方式：
 /// 1. 单一 URL：所有协议使用同一个 URL
 /// 2. 多协议映射：不同协议使用不同的 URL
-///
-/// # 字段
-///
-/// * `map` - 协议到 URL 的映射表
-/// * `default` - 默认 URL，当协议未在 map 中时使用
 #[derive(Clone, Debug)]
 pub enum BaseUrl {
+    /// 多协议映射
     Multi(HashMap<String, String>),
+    /// 单一 URL
     AllInOne(String),
 }
 
+/// URL 查询结果
 pub enum UrlResult<'a> {
+    /// 原生协议支持
     Native(&'a str),
+    /// 需要协议转换
     Foreign(&'a str, &'a str),
+    /// URL 为空
     Empty,
 }
 
@@ -50,7 +53,7 @@ impl BaseUrl {
     ///
     /// # 返回值
     ///
-    /// 如果协议在 map 中，返回对应的 URL；否则返回 None
+    /// 返回对应的 URL 查询结果
     pub fn get(&self, protocol: &str) -> UrlResult<'_> {
         match self {
             Self::Multi(map) => map

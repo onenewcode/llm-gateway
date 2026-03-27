@@ -1,20 +1,19 @@
-//! SSE (Server-Sent Events) parsing and serialization
+//! SSE (Server-Sent Events) 解析和序列化模块
 //!
-//! This module provides types and utilities for handling SSE streams
-//! according to the HTML5 Server-Sent Events specification.
+//! 提供 SSE 流式数据的解析和处理功能
 
 use memchr::memmem::Finder;
 use serde_json::Value as Json;
 use std::{error, fmt, sync::OnceLock};
 
-/// SSE-specific error type
+/// SSE 错误类型
 #[derive(Debug, Clone, PartialEq)]
 pub enum SseError {
-    /// Invalid UTF-8 sequence in the stream
+    /// 流中的无效 UTF-8 序列
     InvalidUtf8,
-    /// Unknown line type in SSE message
+    /// 未知的 SSE 行类型
     UnknownLineType(String),
-    /// Buffer processing error
+    /// 缓冲区处理错误
     BufferError(String),
 }
 
@@ -30,24 +29,20 @@ impl fmt::Display for SseError {
 
 impl error::Error for SseError {}
 
-/// Result type for SSE operations
+/// SSE 操作结果类型
 pub type SseResult<T> = Result<T, SseError>;
 
-/// A parsed SSE message
-///
-/// According to the SSE spec, a message consists of:
-/// - `data`: The message data
-/// - `event`: Optional event type (defaults to "message" if not present)
+/// 解析后的 SSE 消息
 #[derive(Debug, Clone)]
 pub struct SseMessage {
-    /// Parsed JSON data
+    /// 消息数据
     pub data: String,
-    /// Event type (e.g., "content_block_delta", "message_start")
+    /// 事件类型
     pub event: Option<String>,
 }
 
 impl SseMessage {
-    /// Create a new SSE message with data only (no event type)
+    /// 创建只有数据的 SSE 消息
     pub fn new(data: &Json) -> Self {
         Self {
             data: serde_json::to_string(data).unwrap(),
@@ -55,7 +50,7 @@ impl SseMessage {
         }
     }
 
-    /// Create a new SSE message with event type and data
+    /// 创建带事件类型和数据的 SSE 消息
     pub fn with_event(event: impl Into<String>, data: &Json) -> Self {
         Self {
             data: serde_json::to_string(data).unwrap(),
@@ -63,7 +58,7 @@ impl SseMessage {
         }
     }
 
-    /// Create a new SSE message with event type and data
+    /// 创建流结束消息
     pub fn done() -> Self {
         Self {
             data: "[DONE]".into(),
@@ -71,10 +66,12 @@ impl SseMessage {
         }
     }
 
+    /// 判断是否是结束消息
     pub fn is_done(&self) -> bool {
         self.data == "[DONE]" && self.event.is_none()
     }
 
+    /// 判断是否为空消息
     pub fn is_empty(&self) -> bool {
         self.data.trim().is_empty() && self.event.is_none()
     }
@@ -91,27 +88,26 @@ impl fmt::Display for SseMessage {
     }
 }
 
-/// SSE stream collector that parses raw bytes into SseMessage structs
+/// SSE 流收集器，解析原始字节为 SseMessage 结构
 #[derive(Debug, Default)]
 pub struct SseCollector {
-    /// Buffer for incomplete SSE messages
+    /// 不完整 SSE 消息的缓冲区
     buffer: Vec<u8>,
 }
 
 impl SseCollector {
-    /// Create a new SSE collector
+    /// 创建新的 SSE 收集器
     pub fn new() -> Self {
         Default::default()
     }
 
-    /// Collect bytes from HTTP stream and parse complete SSE messages
+    /// 从 HTTP 流收集字节并解析完整的 SSE 消息
     ///
-    /// # Arguments
-    /// * `bytes` - Raw bytes from HTTP stream
+    /// # 参数
+    /// * `bytes` - HTTP 流的原始字节
     ///
-    /// # Returns
-    /// Result containing vector of parsed `SseMessage` events (may be empty if no complete messages),
-    /// or an error if parsing fails
+    /// # 返回值
+    /// 解析后的 `SseMessage` 向量（如果没有完整消息则为空），或解析失败时的错误
     pub fn collect(&mut self, bytes: &[u8]) -> SseResult<Vec<SseMessage>> {
         static FINDER: OnceLock<Finder> = OnceLock::new();
         let finder = FINDER.get_or_init(|| Finder::new(b"\n\n"));
@@ -120,15 +116,15 @@ impl SseCollector {
 
         let mut ans = Vec::new();
 
-        // 搜索
+        // 搜索完整消息（以 \n\n 分隔）
         while let Some(pos) = finder.find(&self.buffer) {
-            // Extract one complete SSE message
+            // 提取一条完整的 SSE 消息
             let tail = self.buffer.split_off(pos + 2);
             let mut msg = std::mem::replace(&mut self.buffer, tail);
             msg.truncate(msg.len() - 2);
             let msg = String::from_utf8(msg).map_err(|_| SseError::InvalidUtf8)?;
 
-            // Parse the message
+            // 解析消息
             if let Some(message) = self.parse_message(&msg)? {
                 ans.push(message)
             }
@@ -137,13 +133,9 @@ impl SseCollector {
         Ok(ans)
     }
 
-    /// Process any remaining data in the buffer when the stream ends
+    /// 处理流结束时缓冲区中剩余的数据
     ///
-    /// This should be called when the SSE stream is complete to handle
-    /// any incomplete message data that may still be in the buffer.
-    ///
-    /// # Returns
-    /// Result containing the final parsed message (if any), or an error if parsing fails
+    /// 当 SSE 流完成时应调用此方法，处理可能仍在缓冲区中的不完整消息数据
     pub fn finish(&mut self) -> SseResult<Option<SseMessage>> {
         let msg = std::mem::take(&mut self.buffer);
         if msg.is_empty() {
@@ -153,7 +145,7 @@ impl SseCollector {
         self.parse_message(&msg)
     }
 
-    /// Parse a single SSE message (one block between \n\n separators)
+    /// 解析单条 SSE 消息（\n\n 分隔的单个块）
     fn parse_message(&self, message: &str) -> SseResult<Option<SseMessage>> {
         let mut ans = SseMessage {
             data: String::new(),
@@ -169,9 +161,9 @@ impl SseCollector {
             } else if let Some(event) = line.strip_prefix("event:") {
                 ans.event = Some(event.trim().into())
             } else if line.is_empty() {
-                // Empty line, ignore
+                // 空行，忽略
             } else if line.starts_with(':') {
-                // Comment line, ignore
+                // 注释行，忽略
             } else {
                 return Err(SseError::UnknownLineType(line.to_string()));
             }

@@ -1,26 +1,24 @@
-//! Health monitoring configuration for backend nodes.
+//! 健康监控配置模块
 //!
-//! This module provides configuration for health monitoring of backend nodes,
-//! including sliding window failure tracking and cooldown periods.
+//! 提供后端节点健康监控的配置，包括滑动窗口失败追踪和冷却期设置
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// Health monitoring configuration (external/TOML format).
+/// 健康监控配置（外部/TOML 格式）
 ///
-/// This struct is used for deserializing configuration from TOML files.
-/// It uses primitive types (`u64`, `u32`) for serialization compatibility.
+/// 用于从 TOML 文件反序列化配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthConfig {
-    /// Size of the sliding time window in seconds (default: 60)
+    /// 滑动时间窗口大小（秒），默认 60
     #[serde(default = "default_window_size")]
     pub window_size: u64,
 
-    /// Number of failures that trigger cooldown (default: 3)
+    /// 触发冷却期的失败次数，默认 3
     #[serde(default = "default_failure_threshold")]
     pub failure_threshold: u32,
 
-    /// Duration of cooldown period in seconds (default: 300)
+    /// 冷却期持续时间（秒），默认 300
     #[serde(default = "default_cooldown_duration")]
     pub cooldown_duration: u64,
 }
@@ -35,20 +33,23 @@ impl Default for HealthConfig {
     }
 }
 
+/// 默认滑动窗口大小：60 秒
 fn default_window_size() -> u64 {
     60
 }
 
+/// 默认失败阈值：3 次
 fn default_failure_threshold() -> u32 {
     3
 }
 
+/// 默认冷却期：300 秒
 fn default_cooldown_duration() -> u64 {
     300
 }
 
 impl HealthConfig {
-    /// Convert to internal configuration with Duration types.
+    /// 转换为内部配置（使用 Duration 类型）
     pub fn to_internal(&self) -> InternalHealthConfig {
         InternalHealthConfig {
             window_size: Duration::from_secs(self.window_size),
@@ -58,19 +59,16 @@ impl HealthConfig {
     }
 }
 
-/// Internal health monitoring configuration.
+/// 内部健康监控配置
 ///
-/// This struct uses `Duration` types for internal use within the application.
-/// It is converted from `HealthConfig` after deserialization.
+/// 使用 Duration 类型用于应用内部
 #[derive(Debug, Clone)]
 pub struct InternalHealthConfig {
-    /// Size of the sliding time window
+    /// 滑动时间窗口大小
     pub window_size: Duration,
-
-    /// Number of failures that trigger cooldown
+    /// 触发冷却期的失败次数
     pub failure_threshold: u32,
-
-    /// Duration of cooldown period
+    /// 冷却期持续时间
     pub cooldown_duration: Duration,
 }
 
@@ -78,7 +76,7 @@ pub struct InternalHealthConfig {
 mod tests {
     use super::*;
 
-    /// Test default HealthConfig values
+    /// 测试默认配置值
     #[test]
     fn test_health_config_default_values() {
         let config = HealthConfig::default();
@@ -87,7 +85,7 @@ mod tests {
         assert_eq!(config.cooldown_duration, 300);
     }
 
-    /// Test HealthConfig to InternalHealthConfig conversion
+    /// 测试 HealthConfig 到 InternalHealthConfig 的转换
     #[test]
     fn test_health_config_to_internal() {
         let config = HealthConfig {
@@ -103,7 +101,7 @@ mod tests {
         assert_eq!(internal.cooldown_duration, Duration::from_secs(600));
     }
 
-    /// Test deserializing full HealthConfig from TOML
+    /// 测试从 TOML 完整解析配置
     #[test]
     fn test_health_config_from_toml_full() {
         let toml_str = r#"
@@ -119,7 +117,7 @@ cooldown_duration = 600
         assert_eq!(config.cooldown_duration, 600);
     }
 
-    /// Test deserializing HealthConfig with default values
+    /// 测试空配置使用默认值
     #[test]
     fn test_health_config_from_toml_defaults() {
         let toml_str = r#"
@@ -133,7 +131,7 @@ cooldown_duration = 600
         assert_eq!(config.cooldown_duration, 300);
     }
 
-    /// Test partial HealthConfig from TOML (some defaults)
+    /// 测试部分配置（部分使用默认值）
     #[test]
     fn test_health_config_from_toml_partial() {
         let toml_str = r#"

@@ -1,3 +1,7 @@
+/// 健康监控模块
+/// 
+/// 实现滑动窗口式的健康检查和熔断机制，防止向后端发送过多失败请求
+
 use llm_gateway_config::InternalHealthConfig;
 use std::collections::VecDeque;
 use std::sync::RwLock;
@@ -6,30 +10,44 @@ use std::time::Instant;
 /// 滑动窗口最大容量限制（防止内存无限增长）
 const MAX_WINDOW_CAPACITY: usize = 10000;
 
-/// Health monitor for a single backend node
+/// 单个后端节点的健康监控器
+/// 
+/// 使用滑动窗口记录请求历史，当失败次数超过阈值时进入冷却期
 pub struct HealthMonitor {
+    /// 监控配置
     config: InternalHealthConfig,
+    /// 状态（包含滑动窗口和熔断状态）
     state: RwLock<HealthState>,
 }
 
+/// 健康状态
 struct HealthState {
+    /// 请求记录滑动窗口
     window: VecDeque<RequestRecord>,
-    failure_count: u32, // 增量失败计数
+    /// 增量失败计数（O(1) 复杂度）
+    failure_count: u32,
+    /// 熔断状态
     circuit: CircuitState,
 }
 
+/// 单次请求记录
 struct RequestRecord {
+    /// 请求时间戳
     timestamp: Instant,
+    /// 是否成功
     success: bool,
 }
 
+/// 熔断状态
 enum CircuitState {
+    /// 健康状态
     Healthy,
+    /// 冷却中
     CoolingDown { until: Instant },
 }
 
 impl HealthMonitor {
-    /// Create a new HealthMonitor with the given config
+    /// 使用给定配置创建新的健康监控器
     pub fn new(config: InternalHealthConfig) -> Self {
         Self {
             config,
@@ -41,7 +59,7 @@ impl HealthMonitor {
         }
     }
 
-    /// Check if the backend is available (not in cooldown)
+    /// 检查后端是否可用（不在冷却期）
     pub fn is_available(&self) -> bool {
         let state = self.state.read().unwrap();
         match &state.circuit {
@@ -50,48 +68,48 @@ impl HealthMonitor {
         }
     }
 
-    /// Record a successful request
+    /// 记录一次成功的请求
     pub fn record_success(&self) {
         let mut state = self.state.write().unwrap();
         let now = Instant::now();
 
-        // Check if recovering from cooldown
+        // 检查是否刚从冷却期恢复
         let was_cooling_down = matches!(state.circuit, CircuitState::CoolingDown { .. });
 
-        // Add success record
+        // 添加成功记录
         state.window.push_back(RequestRecord {
             timestamp: now,
             success: true,
         });
 
-        // Cleanup expired records
+        // 清理过期记录
         Self::cleanup_window_static(&mut state, &self.config, now);
 
-        // Reset to healthy on success
+        // 成功后恢复到健康状态
         if was_cooling_down {
             log::info!("Backend recovered from cooldown");
         }
         state.circuit = CircuitState::Healthy;
     }
 
-    /// Record a failed request
+    /// 记录一次失败的请求
     pub async fn record_failure(&self) {
         let mut state = self.state.write().unwrap();
         let now = Instant::now();
 
-        // Add failure record
+        // 添加失败记录
         state.window.push_back(RequestRecord {
             timestamp: now,
             success: false,
         });
 
-        // Increment failure count
+        // 增量增加失败计数
         state.failure_count += 1;
 
-        // Cleanup expired records and enforce capacity limit
+        // 清理过期记录并强制执行容量限制
         Self::cleanup_window_static(&mut state, &self.config, now);
 
-        // Check if threshold exceeded (O(1) with incremental count)
+        // 检查是否超过阈值（使用增量计数实现 O(1) 复杂度）
         if state.failure_count >= self.config.failure_threshold {
             let until = now + self.config.cooldown_duration;
             log::info!(
@@ -99,19 +117,21 @@ impl HealthMonitor {
                 self.config.cooldown_duration,
                 until
             );
-            // Enter cooldown
+            // 进入冷却期
             state.circuit = CircuitState::CoolingDown { until };
         }
     }
 
-    /// Cleanup expired records from the sliding window (static version for use in async context)
+    /// 清理滑动窗口中的过期记录
+    /// 
+    /// 静态版本，用于异步上下文
     fn cleanup_window_static(state: &mut HealthState, config: &InternalHealthConfig, now: Instant) {
         let cutoff = now - config.window_size;
 
-        // 1. Cleanup time-expired records
+        // 1. 清理时间过期的记录
         while let Some(record) = state.window.front() {
             if record.timestamp < cutoff {
-                // Decrement failure count if expiring a failure record
+                // 如果过期的是失败记录，减少失败计数
                 if !record.success {
                     state.failure_count = state.failure_count.saturating_sub(1);
                 }
@@ -121,7 +141,7 @@ impl HealthMonitor {
             }
         }
 
-        // 2. Cleanup records exceeding capacity limit (from oldest)
+        // 2. 清理超过容量限制的记录（从最旧的开始）
         while state.window.len() > MAX_WINDOW_CAPACITY {
             if let Some(record) = state.window.pop_front()
                 && !record.success

@@ -1,3 +1,7 @@
+// LLM Gateway 核心库
+//
+// 提供请求路由、协议转换和统计功能的核心模块
+
 use http::{Request, request};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
@@ -9,12 +13,12 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-mod backend_node;
-mod error;
-mod health_monitor;
-mod input_node;
-mod sequence_node;
-mod serve;
+mod backend_node; // 后端节点模块
+mod error; // 错误类型定义
+mod health_monitor; // 健康监控模块
+mod input_node; // 输入节点模块
+mod sequence_node; // 序列节点模块
+mod serve; // HTTP 服务模块
 
 pub use error::GatewayError;
 pub use input_node::InputNode;
@@ -39,7 +43,7 @@ pub struct RoutePayload {
 }
 
 impl RoutePayload {
-    /// 创建新的 RoutePayload
+    /// 从 HTTP 请求创建 RoutePayload，解析请求体为 JSON
     pub async fn new(req: Request<Incoming>) -> Result<Self, GatewayError> {
         let (parts, incoming) = req.into_parts();
         let body = incoming.collect().await?;
@@ -49,6 +53,7 @@ impl RoutePayload {
         })
     }
 
+    /// 根据请求路径判断使用的协议
     pub fn protocol(&self) -> Protocol {
         Protocol::from_path(self.parts.uri.path())
     }
@@ -57,38 +62,51 @@ impl RoutePayload {
 /// 路由结果
 pub type RouteResult = Result<Route, RouteError>;
 
+/// 路由结果，包含路由路径和后端信息
 pub struct Route {
+    /// 路由路径上的节点列表
     nodes: Vec<Arc<dyn Node>>,
+    /// 目标后端
     backend: Backend,
 }
 
+/// 后端配置信息
 pub struct Backend {
+    /// 使用的协议
     protocol: Protocol,
+    /// 基础 URL
     base_url: String,
+    /// API 密钥（可选）
     api_key: Option<String>,
 }
 
+/// 路由错误类型
 pub enum RouteError {
+    /// 没有可用的后端
     NoAvailable,
 }
 
-/// 节点 Trait
+/// 节点 Trait - 网关路由图中的节点接口
 pub trait Node: Send + Sync {
-    /// 节点名字
+    /// 获取节点名称
     fn name(&self) -> &str;
-    /// 执行路由
+    /// 执行路由逻辑，返回路由结果
     fn route(&self, payload: &RoutePayload) -> RouteResult;
-    /// 替换连接关系
+    /// 替换节点间的连接关系
     fn replace_connections(&self, nodes: &HashMap<&str, Arc<dyn Node>>);
-    /// 获取健康监控器 (仅 BackendNode 有)
+    /// 获取健康监控器（仅 BackendNode 有实现）
     fn health(&self) -> Option<&Arc<HealthMonitor>> {
         None
     }
 }
 
+/// 根据配置构建网关节点图
+/// 
+/// 从配置文件中读取节点定义，创建节点实例并建立节点间的连接关系
 pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
     use llm_gateway_config::Node as ConfigNode;
 
+    /// 占位节点，用于在连接建立前保存节点名称引用
     struct PlaceHolder(Arc<str>);
 
     impl Node for PlaceHolder {
@@ -103,7 +121,7 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
         }
     }
 
-    // Create health config - use defaults if not specified
+    // 获取健康监控配置，若未指定则使用默认值
     let health_config = config
         .health
         .as_ref()
@@ -144,7 +162,7 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
                 }
             },
             ConfigNode::Backend(n) => {
-                // Create HealthMonitor for this backend
+                // 为后端节点创建健康监控器
                 let health_monitor = Arc::new(HealthMonitor::new(health_config.clone()));
                 nodes.insert(
                     &**name,
@@ -159,6 +177,7 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
         }
     }
 
+    // 建立节点间的连接关系
     for node in nodes.values() {
         node.replace_connections(&nodes)
     }

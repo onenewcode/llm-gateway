@@ -1,87 +1,6 @@
-//! LLM Gateway Protocols
+//! LLM Gateway 协议转换模块
 //!
-//! Protocol conversion utilities for LLM Gateway, supporting bidirectional conversion between
-//! OpenAI Chat Completion API and Anthropic Messages API formats.
-//!
-//! # Features
-//!
-//! - **Request Conversion**: Convert between OpenAI and Anthropic request formats
-//! - **Response Conversion**: Convert between OpenAI and Anthropic response formats
-//! - **Streaming Conversion**: Real-time SSE stream conversion for both protocols
-//! - **Tool Support**: Full tool/function definition and tool_choice conversion
-//! - **Protocol Compliance**: Adheres to official OpenAI and Anthropic API specifications
-//!
-//! # Example
-//!
-//! ## Request Conversion (OpenAI → Anthropic)
-//!
-//! ```rust,ignore
-//! use serde_json::json;
-//! use llm_gateway_protocols::functions::request::openai_to_anthropic;
-//!
-//! let openai_request = json!({
-//!     "model": "gpt-4",
-//!     "messages": [
-//!         {"role": "system", "content": "You are helpful"},
-//!         {"role": "user", "content": "Hello"}
-//!     ],
-//!     "tools": [{
-//!         "type": "function",
-//!         "function": {
-//!             "name": "get_weather",
-//!             "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}
-//!         }
-//!     }],
-//!     "tool_choice": "auto"
-//! });
-//!
-//! let anthropic_request = openai_to_anthropic(openai_request).unwrap();
-//! // Result includes: system field, tools array with input_schema, tool_choice with type
-//! ```
-//!
-//! ## Response Conversion (Anthropic → OpenAI)
-//!
-//! ```rust,ignore
-//! use serde_json::json;
-//! use llm_gateway_protocols::functions::response::anthropic_to_openai;
-//!
-//! let anthropic_response = json!({
-//!     "id": "msg_abc",
-//!     "type": "message",
-//!     "role": "assistant",
-//!     "model": "claude-sonnet-4-5-20250929",
-//!     "content": [{"type": "text", "text": "Hello!"}],
-//!     "stop_reason": "end_turn",
-//!     "usage": {"input_tokens": 10, "output_tokens": 8}
-//! });
-//!
-//! let openai_response = anthropic_to_openai(anthropic_response).unwrap();
-//! // Result includes: choices array, finish_reason: "stop", usage with total_tokens
-//! ```
-//!
-//! # Protocol Support Matrix
-//!
-//! | Feature | OpenAI → Anthropic | Anthropic → OpenAI |
-//! |---------|-------------------|-------------------|
-//! | Basic request/response | ✅ | ✅ |
-//! | System messages | ✅ (extract to system field) | ✅ (convert to system role) |
-//! | Tool definitions | ✅ (parameters → input_schema) | ✅ (input_schema → parameters) |
-//! | Tool choice | ✅ (auto/none/required → type) | ✅ (type → auto/none/required) |
-//! | Response format | ✅ (json_object → system hint) | - |
-//! | Streaming | ✅ | ✅ |
-//! | Image content | - | ⚠️ (skipped) |
-//! | Document content | - | ⚠️ (skipped) |
-//! | Thinking blocks | - | ⚠️ (skipped) |
-//!
-//! # Error Handling
-//!
-//! All conversion functions return `ProtocolResult<T>` which is a type alias for
-//! `Result<T, ProtocolError>`. Error types include:
-//!
-//! - `MissingRequiredField`: Required field is missing
-//! - `InvalidRequest`: Request format is invalid
-//! - `ConversionError`: Conversion failed
-//! - `InvalidStreamEvent`: Invalid SSE event format
+//! 提供 OpenAI 和 Anthropic 协议之间的双向转换功能
 
 mod functions;
 mod sse;
@@ -92,13 +11,17 @@ pub use functions::streaming;
 pub use functions::{ProtocolError, ProtocolResult};
 pub use sse::{SseCollector, SseError, SseMessage, SseResult};
 
+/// 支持的协议类型
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Protocol {
+    /// OpenAI 协议
     OpenAI,
+    /// Anthropic 协议
     Anthropic,
 }
 
 impl Protocol {
+    /// 从协议名称创建
     pub fn from_name(name: &str) -> Self {
         match name {
             "openai" => Self::OpenAI,
@@ -107,6 +30,7 @@ impl Protocol {
         }
     }
 
+    /// 获取协议名称
     pub fn name(&self) -> &str {
         match self {
             Self::OpenAI => "openai",
@@ -114,6 +38,7 @@ impl Protocol {
         }
     }
 
+    /// 从请求路径创建
     pub fn from_path(path: &str) -> Self {
         match path {
             "/v1/chat/completions" => Self::OpenAI,
@@ -122,6 +47,7 @@ impl Protocol {
         }
     }
 
+    /// 获取请求路径
     pub fn path(&self) -> &str {
         match self {
             Self::OpenAI => "/v1/chat/completions",

@@ -1,3 +1,5 @@
+//! 统计配置模块
+
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -33,18 +35,22 @@ impl Default for StatisticsConfig {
     }
 }
 
+/// 默认启用统计
 fn default_enabled() -> bool {
     true
 }
 
+/// 默认数据库路径
 fn default_db_path() -> String {
     "stats.db".to_string()
 }
 
+/// 默认保留天数
 fn default_retention_days() -> u64 {
     30
 }
 
+/// 默认写入缓冲区大小
 fn default_write_buffer_size() -> usize {
     1000
 }
@@ -73,6 +79,7 @@ impl Default for AggregationConfig {
     }
 }
 
+/// 默认窗口大小列表：5分钟、15分钟、1小时、1天
 fn default_window_sizes() -> Vec<NonZeroU64> {
     vec![
         NonZeroU64::new(300).unwrap(),   // 5min
@@ -82,10 +89,12 @@ fn default_window_sizes() -> Vec<NonZeroU64> {
     ]
 }
 
+/// 默认窗口大小：1小时
 fn default_window() -> NonZeroU64 {
-    NonZeroU64::new(3600).unwrap() // 1hour
+    NonZeroU64::new(3600).unwrap()
 }
 
+/// 默认自动聚合
 fn default_auto_aggregate() -> bool {
     true
 }
@@ -102,7 +111,7 @@ impl StatisticsConfig {
         }
     }
 
-    /// 验证配置
+    /// 验证配置有效性
     pub fn validate(&self) -> Result<(), String> {
         if self.retention_days == 0 {
             return Err("retention_days must be greater than 0".to_string());

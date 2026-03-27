@@ -1,3 +1,5 @@
+//! 查询参数和结果类型定义
+
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -116,6 +118,7 @@ pub struct StatsQueryBuilder {
 }
 
 impl StatsQueryBuilder {
+    /// 创建新的查询构建器
     pub fn new(start_time: i64, end_time: i64, granularity: TimeGranularity) -> Self {
         Self {
             start_time,
@@ -126,16 +129,19 @@ impl StatsQueryBuilder {
         }
     }
 
+    /// 添加模型过滤条件
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
     }
 
+    /// 添加后端过滤条件
     pub fn with_backend(mut self, backend: impl Into<String>) -> Self {
         self.backend = Some(backend.into());
         self
     }
 
+    /// 构建查询参数
     pub fn build(self) -> AggQuery {
         let window_size = NonZeroU64::new(self.granularity.as_seconds() as u64)
             .unwrap_or_else(|| NonZeroU64::new(3600).unwrap());

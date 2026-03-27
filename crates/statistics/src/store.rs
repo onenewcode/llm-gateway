@@ -1,3 +1,5 @@
+//! 统计存储管理器模块
+
 use crate::Result;
 use crate::StatisticsError::DatabaseError;
 use crate::config::StatisticsConfig;

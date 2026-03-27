@@ -9,12 +9,13 @@
 ///
 /// # 字段
 ///
-/// * `name` - 节点名称，用于路由识别
 /// * `port` - 监听端口号
 /// * `models` - 支持的模型列表，请求将根据模型名路由
 #[derive(Clone, Debug)]
 pub struct InputNode {
+    /// 监听端口号
     pub port: u16,
+    /// 支持的模型列表
     pub models: Vec<String>,
 }
 

@@ -1,3 +1,5 @@
+//! 聚合计算器模块
+
 use crate::event::RoutingEvent;
 use crate::query::AggStats;
 use std::collections::HashMap;

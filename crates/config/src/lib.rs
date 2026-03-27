@@ -44,15 +44,7 @@
 //!
 //! # 错误处理
 //!
-//! 解析失败时返回 [`ConfigParseError`]，包含详细的错误信息和路径：
-//!
-//! ```rust
-//! use llm_gateway_config::{GatewayConfig, ConfigParseError};
-//! use std::str::FromStr;
-//!
-//! let result = GatewayConfig::from_str("invalid toml");
-//! assert!(result.is_err());
-//! ```
+//! 解析失败时返回 [`ConfigParseError`]，包含详细的错误信息和路径
 
 mod backend;
 mod error;
@@ -94,14 +86,10 @@ impl FromStr for GatewayConfig {
             });
         };
 
-        // ============================================
         // 解析统计配置 [statistics]
-        // ============================================
         let statistics = parse_statistics_config(root_table);
 
-        // ============================================
         // 解析健康监控配置 [health]
-        // ============================================
         let health = root_table
             .get("health")
             .and_then(|v| v.as_table())
@@ -112,9 +100,7 @@ impl FromStr for GatewayConfig {
 
         let mut nodes: HashMap<Arc<str>, Node> = HashMap::new();
 
-        // ============================================
         // 解析输入节点 [input.*]
-        // ============================================
         // 输入节点定义网关入口，包含 port 和 models 字段
         if let Some(input_table) = root_table.get("input").and_then(|v| v.as_table()) {
             for (name, value) in input_table {
@@ -151,9 +137,7 @@ impl FromStr for GatewayConfig {
             }
         }
 
-        // ============================================
         // 解析虚拟节点 [node.*]
-        // ============================================
         // 虚拟节点定义路由策略，目前支持 sequence（顺序尝试）
         if let Some(node_table) = root_table.get("node").and_then(|v| v.as_table()) {
             for (name, value) in node_table {
@@ -179,9 +163,7 @@ impl FromStr for GatewayConfig {
             }
         }
 
-        // ============================================
         // 解析后端节点 [backend.*]
-        // ============================================
         // 后端节点支持两种格式：
         // 1. 简单字符串：[backend] 下的键值对，直接转发
         // 2. 表配置：[backend.name] 下的 base-url 和 api-key
@@ -193,7 +175,6 @@ impl FromStr for GatewayConfig {
                 }
 
                 // 格式 1: 简单字符串值 - [backend] 下的键值对
-                // 例如："backend-1" = "http://192.168.1.1:8000"
                 if let Some(url_str) = value.as_str() {
                     let base_url = BaseUrl::AllInOne(url_str.into());
 
@@ -208,15 +189,14 @@ impl FromStr for GatewayConfig {
                 }
 
                 // 格式 2: 表配置 - [backend.name] 下的配置
-                // 例如：[backend.aliyun]
                 if let Some(backend_config) = value.as_table() {
                     // 解析 base-url 字段（必需）
                     let base_url = if let Some(url_value) = backend_config.get("base-url") {
                         if let Some(url_str) = url_value.as_str() {
-                            // 简单字符串格式：base-url = "http://..."
+                            // 简单字符串格式
                             BaseUrl::AllInOne(url_str.into())
                         } else if let Some(url_table) = url_value.as_table() {
-                            // 表格式带协议特定 URL：base-url = { anthropic = "..." }
+                            // 表格式带协议特定 URL
                             let mut map = HashMap::new();
                             for (protocol, url) in url_table {
                                 if let Some(url_str) = url.as_str() {
@@ -279,6 +259,7 @@ mod tests {
     use std::str::FromStr;
 
     /// 完整配置解析测试
+    /// 
     /// 验证所有节点类型的正确解析
     #[test]
     fn test_parse_full_config() {

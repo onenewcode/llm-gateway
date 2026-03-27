@@ -1,3 +1,6 @@
+/// HTTP 服务模块
+///
+/// 实现网关的 HTTP 服务器，处理请求路由、转发和协议转换
 use crate::{
     Backend, GatewayError, InputNode, Node, Route, RouteError, RoutePayload, StatsStoreManager,
 };
@@ -24,10 +27,14 @@ use std::time::Instant;
 use std::{fmt::Write, sync::Arc};
 use tokio::net::TcpListener;
 
+/// HTTP 响应体的类型别名
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, GatewayError>;
+/// HTTPS 客户端的类型别名
 type HttpsClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
-/// 运行 HTTP 服务器
+/// 启动 HTTP 服务器
+///
+/// 在指定端口监听，为每个连接启动独立的处理任务
 pub async fn serve(
     input_node: &Arc<InputNode>,
     stats: Option<Arc<StatsStoreManager>>,
@@ -61,6 +68,9 @@ pub async fn serve(
     }
 }
 
+/// 创建 HTTPS 客户端
+///
+/// 配置支持 HTTP 和 HTTPS 的连接器
 fn client() -> HttpsClient {
     // 创建支持 HTTP 和 HTTPS 的连接器
     let mut http_connector = HttpConnector::new();
@@ -79,6 +89,9 @@ fn client() -> HttpsClient {
         .build(https_connector)
 }
 
+/// 解析环境变量引用
+///
+/// 如果字符串以 $ 开头，则读取对应的环境变量；否则返回原字符串
 fn env_key(key: &str) -> Cow<'_, str> {
     key.strip_prefix("$")
         .and_then(|key| env::var(key).ok())
@@ -86,6 +99,7 @@ fn env_key(key: &str) -> Cow<'_, str> {
         .unwrap_or(Cow::Borrowed(key))
 }
 
+/// 生成方法不允许的响应
 fn method_not_allowed(allow: Method) -> Response<BoxBody> {
     let allow = allow.as_str();
     Response::builder()
@@ -100,6 +114,8 @@ fn method_not_allowed(allow: Method) -> Response<BoxBody> {
 }
 
 /// 处理单个 HTTP 请求
+///
+/// 解析请求，执行路由，转发到后端并记录统计信息
 async fn handle_request(
     remote_addr: SocketAddr,
     req: Request<hyper::body::Incoming>,
@@ -232,7 +248,7 @@ fn timestamp_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// 处理 /v1/models 请求
+/// 处理 /v1/models 请求，返回可用模型列表
 async fn handle_models_request(input_node: &InputNode) -> Result<Response<BoxBody>, GatewayError> {
     let models: Vec<Value> = input_node
         .models
@@ -265,10 +281,11 @@ async fn handle_models_request(input_node: &InputNode) -> Result<Response<BoxBod
         .unwrap())
 }
 
+/// HTTP 头名称常量
 const X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
 const ANTHROPIC_VERSION: HeaderName = HeaderName::from_static("anthropic-version");
 
-/// 直接转发请求到后端，支持 SSE 流式响应
+/// 直接转发请求到后端（相同协议），支持 SSE 流式响应
 async fn forward_to_backend(
     payload: RoutePayload,
     backend: Backend,
@@ -288,6 +305,7 @@ async fn forward_to_backend(
 
     let mut skip_header = HashSet::from([HOST, CONTENT_TYPE, CONTENT_LENGTH]);
 
+    // 处理 API 密钥
     if let Some(api_key) = backend.api_key.as_deref() {
         let mut api_key_added = false;
         if payload.parts.headers.contains_key(X_API_KEY) {
@@ -326,6 +344,7 @@ async fn forward_to_backend(
     // 发送请求到后端
     match client.request(forward_req).await {
         Ok(response) => {
+            // 记录成功
             if let Some(node) = backend_node
                 && let Some(health) = node.health()
             {
@@ -342,6 +361,7 @@ async fn forward_to_backend(
             ))
         }
         Err(_) => {
+            // 记录失败
             if let Some(node) = backend_node
                 && let Some(health) = node.health()
             {
@@ -354,6 +374,7 @@ async fn forward_to_backend(
     }
 }
 
+/// 转发请求到使用不同协议的后端，并进行协议转换
 async fn forward_to_foreign(
     payload: RoutePayload,
     backend: Backend,
@@ -381,6 +402,7 @@ async fn forward_to_foreign(
         skip_header.insert(ANTHROPIC_VERSION);
     }
 
+    // 处理 API 密钥
     if let Some(api_key) = backend.api_key.as_deref() {
         let api_key = env_key(api_key);
         match backend.protocol {
@@ -389,7 +411,7 @@ async fn forward_to_foreign(
         }
     }
 
-    // 转发所有原始 headers
+    // 转发原始 headers
     for (name, value) in payload.parts.headers {
         if let Some(name) = name
             && !skip_header.contains(&name)
@@ -398,7 +420,7 @@ async fn forward_to_foreign(
         }
     }
 
-    // 协议转换
+    // 请求体协议转换
     let body = match (protocol, backend.protocol) {
         (Protocol::OpenAI, Protocol::Anthropic) => {
             request::openai_to_anthropic(payload.body).unwrap()
@@ -414,6 +436,7 @@ async fn forward_to_foreign(
         .body(Full::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
 
+    // 创建流式响应转换器
     let converter: Box<dyn StreamingCollector> = match (protocol, backend.protocol) {
         (Protocol::OpenAI, Protocol::Anthropic) => {
             Box::new(streaming::AnthropicToOpenai::default())
@@ -427,6 +450,7 @@ async fn forward_to_foreign(
     // 发送请求到后端
     match client.request(forward_req).await {
         Ok(response) => {
+            // 记录成功
             if let Some(node) = backend_node
                 && let Some(health) = node.health()
             {
@@ -435,6 +459,7 @@ async fn forward_to_foreign(
             Ok(forward_foreign_response(response, converter))
         }
         Err(_) => {
+            // 记录失败
             if let Some(node) = backend_node
                 && let Some(health) = node.health()
             {
@@ -447,7 +472,7 @@ async fn forward_to_foreign(
     }
 }
 
-/// 使用 Stream 方式处理协议转换，错误时真正关闭流
+/// 使用 Stream 方式处理协议转换，错误时立即关闭流
 fn forward_foreign_response(
     response: Response<Incoming>,
     converter: Box<dyn StreamingCollector>,
@@ -464,7 +489,7 @@ fn forward_foreign_response(
     let converter = Mutex::new(converter);
     let error_occurred = Arc::new(AtomicBool::new(false));
 
-    // 创建一个 Stream，在错误时立即停止
+    // 创建处理流，错误时立即停止
     let processed_stream = data_stream
         .try_take_while({
             let error_occurred = error_occurred.clone();
@@ -493,7 +518,7 @@ fn forward_foreign_response(
     Response::from_parts(parts, BodyExt::boxed(new_body))
 }
 
-/// 处理单个数据帧，返回 SSE 格式的输出
+/// 处理单个 SSE 数据帧，返回转换后的 SSE 格式输出
 fn process_frame(
     bytes: &Bytes,
     collector: &Mutex<SseCollector>,
