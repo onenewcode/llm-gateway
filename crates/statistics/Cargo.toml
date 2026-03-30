@@ -3,9 +3,14 @@ name = "llm-gateway-statistics"
 version = "0.0.0"
 edition = "2024"
 
+[[bin]]
+name = "llm-stats"
+path = "src/main.rs"
+
 [dependencies]
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tokio = { version = "1.50", features = [
     "rt-multi-thread",
     "sync",
@@ -14,6 +19,12 @@ tokio = { version = "1.50", features = [
 ] }
 thiserror = "1.0"
 log = "0.4"
+
+# CLI dependencies
+clap = { version = "4.5", features = ["derive"] }
+chrono = "0.4"
+humantime = "2.1"
+rustyline = "15"
 
 [dev-dependencies]
 tempfile = "3.0"

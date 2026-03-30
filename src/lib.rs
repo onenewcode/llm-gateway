@@ -2,6 +2,7 @@
 //!
 //! 提供请求路由、协议转换和统计功能的核心模块
 
+mod api; // Admin API module
 mod backend_node; // 后端节点模块
 mod error; // 错误类型定义
 mod health_monitor; // 健康监控模块
@@ -15,6 +16,9 @@ extern crate log;
 pub use error::GatewayError;
 pub use input_node::InputNode;
 pub use serve::serve;
+
+// Admin server
+pub use api::admin::AdminServer;
 
 // 统计模块重新导出
 pub use llm_gateway_statistics::{

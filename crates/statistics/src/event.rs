@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
 /// 路由事件，记录每一次请求的路由过程
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct RoutingEvent {
     /// 毫秒级 Unix 时间戳
     pub timestamp: i64,

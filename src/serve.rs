@@ -314,7 +314,7 @@ async fn handle_models_request(input_node: &InputNode) -> Result<Response<BoxBod
 
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
+        .header(CONTENT_TYPE, "application/json")
         .body(
             Full::<Bytes>::from(response.to_string())
                 .map_err(|_| GatewayError::NoAvailableBackend)

@@ -62,3 +62,12 @@ window-sizes = [300, 900, 3600, 86400]
 default-window = 3600
 # 是否自动预计算
 auto-aggregate = true
+
+# ============================================
+# 管理 API 配置
+# ============================================
+[admin]
+# 管理 API 监听端口（默认 8080）
+port = 8080
+# 认证 Token（可选），如果设置则请求需要 Authorization: Bearer <token> 头
+# auth-token = "your-secret-token"

@@ -46,12 +46,14 @@
 //!
 //! 解析失败时返回 [`ConfigParseError`]，包含详细的错误信息和路径
 
+mod admin;
 mod backend;
 mod error;
 mod health;
 mod input;
 mod node;
 
+pub use admin::AdminConfig;
 pub use backend::{BackendNode, BaseUrl, UrlResult};
 pub use error::Error as ConfigParseError;
 pub use health::{HealthConfig, InternalHealthConfig};
@@ -67,6 +69,7 @@ pub struct GatewayConfig {
     pub nodes: HashMap<Arc<str>, Node>,
     pub statistics: Option<llm_gateway_statistics::StatisticsConfig>,
     pub health: Option<HealthConfig>,
+    pub admin: Option<AdminConfig>,
 }
 
 impl FromStr for GatewayConfig {
@@ -83,6 +86,7 @@ impl FromStr for GatewayConfig {
                 nodes: HashMap::new(),
                 statistics: None,
                 health: None,
+                admin: None,
             });
         };
 
@@ -97,6 +101,9 @@ impl FromStr for GatewayConfig {
                 let toml_str = toml::to_string(table).ok()?;
                 toml::from_str(&toml_str).ok()
             });
+
+        // 解析管理配置 [admin]
+        let admin = parse_admin_config(root_table);
 
         let mut nodes: HashMap<Arc<str>, Node> = HashMap::new();
 
@@ -281,6 +288,7 @@ impl FromStr for GatewayConfig {
             nodes,
             statistics,
             health,
+            admin,
         })
     }
 }
@@ -296,6 +304,17 @@ fn parse_statistics_config(
             // 将 TOML 表转换为字符串
             let toml_str = toml::to_string(table).ok()?;
             // 使用 serde 反序列化
+            toml::from_str(&toml_str).ok()
+        })
+}
+
+/// 解析管理配置
+fn parse_admin_config(root_table: &toml::Table) -> Option<AdminConfig> {
+    root_table
+        .get("admin")
+        .and_then(|v| v.as_table())
+        .and_then(|table| {
+            let toml_str = toml::to_string(table).ok()?;
             toml::from_str(&toml_str).ok()
         })
 }
@@ -464,5 +483,36 @@ models = ["qwen3.5-35b-a3b"]
             }
             _ => panic!("Expected ParseError for alias target not in models"),
         }
+    }
+
+    /// 测试 admin 配置解析
+    #[test]
+    fn test_parse_admin_config() {
+        let toml_str = r#"
+[admin]
+port = 8080
+auth-token = "secret-token"
+"#;
+
+        let result = GatewayConfig::from_str(toml_str);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+
+        assert!(config.admin.is_some());
+        let admin = config.admin.unwrap();
+        assert_eq!(admin.port, 8080);
+        assert_eq!(admin.auth_token, Some("secret-token".to_string()));
+    }
+
+    /// 测试 admin 配置默认值（未指定时）
+    #[test]
+    fn test_admin_config_default() {
+        let toml_str = r#""#;
+        let result = GatewayConfig::from_str(toml_str);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+
+        // Default should be None (not specified)
+        assert!(config.admin.is_none());
     }
 }

@@ -13,6 +13,7 @@ llm-gateway-statistics.path = "crates/statistics"
 serde = "1.0"
 serde_json = "1.0"
 thiserror = "1.0"
+chrono = "0.4"
 
 hyper = { version = "1.8", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = [
@@ -25,6 +26,7 @@ hyper-rustls = { version = "0.27", features = ["http1", "rustls-native-certs"] }
 
 http = "1"
 http-body-util = "0.1"
+bytes = "1"
 tokio = { version = "1.50", features = ["rt-multi-thread", "net"] }
 futures = "0.3"
 

@@ -1,6 +1,6 @@
 mod logger;
 
-use llm_gateway::{StatisticsConfig, StatsStoreManager, build, serve};
+use llm_gateway::{AdminServer, StatisticsConfig, StatsStoreManager, build, serve};
 use llm_gateway_config::GatewayConfig;
 use log::{LevelFilter, info, warn};
 use std::{env, fs, sync::Arc};
@@ -32,6 +32,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .block_on(async move {
             // 在 runtime 内初始化统计模块
             let stats = init_statistics(&config.statistics).await?;
+
+            // Start admin server once (not per input node)
+            if let Some(admin_config) = &config.admin {
+                if let Some(stats) = &stats {
+                    let admin_server = AdminServer::new(
+                        admin_config.port,
+                        admin_config.auth_token.clone(),
+                        Arc::clone(stats),
+                    );
+                    tokio::spawn(async move {
+                        if let Err(e) = admin_server.run().await {
+                            warn!("Admin server error: {e}")
+                        }
+                    });
+                } else {
+                    warn!("Admin server requires statistics to be enabled")
+                };
+            }
 
             // 为每个输入节点启动 HTTP 服务器
             let mut set = JoinSet::new();

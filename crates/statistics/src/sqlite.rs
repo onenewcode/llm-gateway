@@ -49,6 +49,12 @@ impl SqliteStore {
             .lock()
             .map_err(|e| StatisticsError::DatabaseError(format!("Mutex poisoned: {}", e)))?;
 
+        // 启用 WAL 模式，支持多进程并发读写
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(|e| {
+                StatisticsError::DatabaseError(format!("Failed to enable WAL mode: {}", e))
+            })?;
+
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS events (
