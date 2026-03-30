@@ -355,65 +355,6 @@ impl SqliteStore {
         })
     }
 
-    /// 插入或更新聚合统计
-    ///
-    /// 用于后台聚合任务的预计算结果存储
-    #[allow(dead_code)]
-    fn upsert_aggregated_stats(&self, stats: &[AggStats]) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| StatisticsError::DatabaseError(format!("Mutex poisoned: {e}")))?;
-
-        let mut stmt = conn
-            .prepare_cached(
-                "
-            INSERT INTO aggregated_stats (
-                window_start, window_size, model, backend,
-                total_requests, success_count, fail_count,
-                avg_duration_ms, min_duration_ms, max_duration_ms,
-                p50_duration_ms, p90_duration_ms, p99_duration_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-            ON CONFLICT(window_start, window_size, model, backend) DO UPDATE SET
-                total_requests = excluded.total_requests,
-                success_count = excluded.success_count,
-                fail_count = excluded.fail_count,
-                avg_duration_ms = excluded.avg_duration_ms,
-                min_duration_ms = excluded.min_duration_ms,
-                max_duration_ms = excluded.max_duration_ms,
-                p50_duration_ms = excluded.p50_duration_ms,
-                p90_duration_ms = excluded.p90_duration_ms,
-                p99_duration_ms = excluded.p99_duration_ms
-            ",
-            )
-            .map_err(|e| {
-                StatisticsError::DatabaseError(format!("Failed to prepare upsert: {}", e))
-            })?;
-
-        for stat in stats {
-            stmt.execute(params![
-                stat.window_start,
-                stat.window_size,
-                stat.model,
-                stat.backend,
-                stat.total_requests,
-                stat.success_count,
-                stat.fail_count,
-                stat.avg_duration_ms,
-                stat.min_duration_ms,
-                stat.max_duration_ms,
-                stat.p50_duration_ms,
-                stat.p90_duration_ms,
-                stat.p99_duration_ms,
-            ])
-            .map_err(|e| {
-                StatisticsError::DatabaseError(format!("Failed to upsert stats: {}", e))
-            })?;
-        }
-
-        Ok(())
-    }
-
     /// 清理过期数据（内部同步方法）
     pub fn cleanup_old_internal(&self, before: i64) -> Result<usize> {
         let conn = self

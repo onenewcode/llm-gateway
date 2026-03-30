@@ -13,7 +13,7 @@ pub mod store;
 // 重新导出常用类型
 pub use aggregator::Aggregator;
 pub use cli::{OutputFormat, format_events};
-pub use config::{AggregationConfig, StatisticsConfig};
+pub use config::StatisticsConfig;
 pub use event::{RoutingEvent, RoutingEventBuilder};
 pub use query::{AggQuery, AggStats, EventFilter, StatsQueryBuilder, TimeGranularity};
 pub use sqlite::SqliteStore;

@@ -3,6 +3,7 @@
 ## 1. 概述
 
 本文档定义 LLM Gateway 统计查询功能的两种访问方式：
+
 1. **Web API**: RESTful HTTP 接口，用于外部系统集成
 2. **CLI 工具**: 对话式命令行界面，用于运维人员实时查询
 
@@ -11,11 +12,13 @@
 ## 2. 背景
 
 ### 2.1 现有架构
+
 - `crates/statistics` 模块负责事件记录和统计聚合
 - 数据存储在 SQLite (`stats.db`) 中
 - 包含 `events` 表（原始事件）和 `aggregated_stats` 表（预计算聚合）
 
 ### 2.2 需求变更
+
 - 启用 SQLite WAL 模式，支持多进程并发访问
 - 新增 Web API 供外部查询聚合统计
 - 新增 CLI 工具供运维查询原始事件和统计
@@ -31,16 +34,16 @@ conn.execute("PRAGMA journal_mode=WAL;", [])?;
 
 ### 3.2 WAL 模式特性
 
-| 特性 | 说明 |
-|------|------|
-| 读-读并发 | 支持多个进程同时读取 |
-| 读-写并发 | 支持一个进程写入，多个进程读取 |
-| 写-写并发 | 不支持，写入串行化 |
-| 额外文件 | 生成 `.db-wal` 和 `.db-shm` 文件 |
+| 特性      | 说明                             |
+|-----------|----------------------------------|
+| 读-读并发 | 支持多个进程同时读取             |
+| 读-写并发 | 支持一个进程写入，多个进程读取   |
+| 写-写并发 | 不支持，写入串行化               |
+| 额外文件  | 生成 `.db-wal` 和 `.db-shm` 文件 |
 
 ### 3.3 访问模式
 
-```
+```plaintext
 ┌──────────────────────────────────────────────┐
 │               stats.db (WAL Mode)            │
 ├──────────────────────────────────────────────┤
@@ -63,11 +66,11 @@ conn.execute("PRAGMA journal_mode=WAL;", [])?;
 
 ### 4.1 基础信息
 
-| 项目 | 值 |
-|------|-----|
-| Base URL | `http://<gateway-host>:<admin-port>/v1` |
-| Content-Type | `application/json` |
-| 认证 | `Authorization: Bearer <token>` |
+| 项目         | 值                                      |
+|--------------|-----------------------------------------|
+| Base URL     | `http://<gateway-host>:<admin-port>/v1` |
+| Content-Type | `application/json`                      |
+| 认证         | `Authorization: Bearer <token>`         |
 
 **Admin Port 配置**（`config.toml`）：
 
@@ -81,7 +84,8 @@ auth-token = "your-secret-token"
 ```
 
 **随机端口示例日志：**
-```
+
+```plaintext
 [2025-03-27T10:23:45Z INFO] Admin API listening on http://0.0.0.0:49231/v1
 ```
 
@@ -89,22 +93,23 @@ auth-token = "your-secret-token"
 
 #### 4.2.1 聚合统计查询
 
-```
+```plaintext
 GET /v1/stats/aggregate
 ```
 
 **Query 参数：**
 
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `start_time` | string | 是 | 开始时间（毫秒时间戳或 ISO8601 格式） |
-| `end_time` | string | 是 | 结束时间（毫秒时间戳或 ISO8601 格式） |
-| `granularity` | string | 否 | 时间粒度：`5m`/`15m`/`1h`/`1d`，默认 `1h` |
-| `group_by` | string | 否 | ~~分组维度：`model`/`backend`/`both`，默认 `both`~~ ⚠️ **当前版本未实现** |
-| `model` | string | 否 | 过滤特定模型 |
-| `backend` | string | 否 | 过滤特定后端 |
+| 参数          | 类型   | 必填 | 说明                                                                      |
+|:-------------:|:------:|:----:|---------------------------------------------------------------------------|
+| `start_time`  | string | 是   | 开始时间（毫秒时间戳或 ISO8601 格式）                                     |
+| `end_time`    | string | 是   | 结束时间（毫秒时间戳或 ISO8601 格式）                                     |
+| `granularity` | string | 否   | 时间粒度：`5m`/`15m`/`1h`/`1d`，默认 `1h`                                 |
+| `group_by`    | string | 否   | ~~分组维度：`model`/`backend`/`both`，默认 `both`~~ ⚠️ **当前版本未实现** |
+| `model`       | string | 否   | 过滤特定模型                                                              |
+| `backend`     | string | 否   | 过滤特定后端                                                              |
 
 **时间格式示例：**
+
 - 毫秒时间戳：`1743004800000`
 - ISO8601：`2025-03-27T10:00:00Z`
 - RFC3339：`2025-03-27T10:00:00+08:00`
@@ -140,7 +145,7 @@ GET /v1/stats/aggregate
 
 #### 4.2.2 实时概览
 
-```
+```plaintext
 GET /v1/stats/overview
 ```
 
@@ -174,12 +179,12 @@ GET /v1/stats/overview
 
 ### 4.3 错误处理
 
-| HTTP 状态码 | 错误码 | 说明 |
-|-------------|--------|------|
-| 400 | `INVALID_PARAMS` | 参数错误（如时间范围无效） |
-| 401 | `UNAUTHORIZED` | 认证失败 |
-| 403 | `FORBIDDEN` | 权限不足 |
-| 500 | `INTERNAL_ERROR` | 内部错误 |
+| HTTP 状态码 | 错误码           | 说明                       |
+|:-----------:|:----------------:|----------------------------|
+| 400         | `INVALID_PARAMS` | 参数错误（如时间范围无效） |
+| 401         | `UNAUTHORIZED`   | 认证失败                   |
+| 403         | `FORBIDDEN`      | 权限不足                   |
+| 500         | `INTERNAL_ERROR` | 内部错误                   |
 
 **错误响应格式：**
 
@@ -217,6 +222,7 @@ llm-stats --help
 CLI 采用 REPL（Read-Eval-Print Loop）模式，启动后进入交互式命令行。
 
 **状态管理**：
+
 - 每次 `query` 命令的结果保存到会话缓存中
 - 可通过 `detail <index>` 查看缓存中任意事件的详情
 - 新查询会替换缓存，不会累积
@@ -224,7 +230,7 @@ CLI 采用 REPL（Read-Eval-Print Loop）模式，启动后进入交互式命令
 
 **数据来源**：所有数据（events、models、backends）均来自 `stats.db` 数据库，运行时聚合计算。
 
-```
+```plaintext
 $ llm-stats
 LLM Gateway Statistics CLI
 Stats DB: ./stats.db
@@ -310,7 +316,7 @@ Goodbye!
 
 #### 5.3.1 query - 查询原始事件
 
-```
+```plaintext
 query [OPTIONS]
 
 Options:
@@ -326,7 +332,7 @@ Options:
 
 #### 5.3.2 stats - 聚合统计
 
-```
+```plaintext
 stats [OPTIONS]
 
 Options:
@@ -340,7 +346,7 @@ Options:
 
 #### 5.3.3 models - 列出所有模型
 
-```
+```plaintext
 models [OPTIONS]
 
 Options:
@@ -350,7 +356,7 @@ Options:
 
 #### 5.3.4 backends - 列出所有后端
 
-```
+```plaintext
 backends [OPTIONS]
 
 Options:
@@ -360,7 +366,7 @@ Options:
 
 #### 5.3.5 recent - 快捷查看最近事件
 
-```
+```plaintext
 recent [OPTIONS]
 
 Options:
@@ -369,7 +375,7 @@ Options:
 
 #### 5.3.6 detail - 查看缓存事件详情
 
-```
+```plaintext
 detail <index>
 
 显示最近一次 query 命令结果中指定索引的事件详情。
@@ -405,7 +411,7 @@ ORDER BY event_count DESC
 
 ## 6. 数据流
 
-```
+```plaintext
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         LLM Gateway                                  │
 ├──────────────────────────────────────────────────────────────────────┤
@@ -440,10 +446,12 @@ ORDER BY event_count DESC
 ## 7. 实现计划
 
 ### 7.1 Phase 1: 数据库配置 ✅
+
 - [x] 启用 SQLite WAL 模式（通过 `.gitignore` 配置 `-shm` 和 `-wal` 文件）
 - [x] 验证多进程并发访问
 
 ### 7.2 Phase 2: Web API ✅
+
 - [x] 在 `src/` 下创建 `api/` 目录
 - [x] 实现 `AdminConfig` 配置解析（`llm_gateway_config::AdminConfig`）
 - [x] 实现 `GET /v1/stats/aggregate` 端点（返回 ISO8601 时间格式）
@@ -453,9 +461,11 @@ ORDER BY event_count DESC
 - [x] 集成到 `main.rs`
 
 **未实现的功能：**
+
 - ⚠️ `group_by` 参数（设计支持 `model`/`backend`/`both`，当前仅按两者分组返回）
 
 ### 7.3 Phase 3: CLI 工具 ✅
+
 - [x] 在 `crates/statistics/Cargo.toml` 添加 bin target
 - [x] 添加依赖：`clap`、`chrono`、`humantime`、`rustyline`
 - [x] 创建 `main.rs` 作为 CLI 入口
@@ -489,52 +499,30 @@ rustyline = "15"
 # 现有 dev-dependencies...
 ```
 
-## 9. 文件结构
-
-```
-crates/statistics/
-├── Cargo.toml          # 添加 bin target 和 CLI 依赖
-├── src/
-│   ├── lib.rs
-│   ├── main.rs         # 新增: CLI 入口 (llm-stats)
-│   ├── cli/            # 新增: CLI 模块目录
-│   │   ├── mod.rs
-│   │   ├── repl.rs     # REPL 交互循环
-│   │   ├── commands.rs # 命令处理
-│   │   ├── formatter.rs# 输出格式化
-│   │   └── cache.rs   # 查询结果缓存
-│   ├── sqlite.rs       # 修改: 启用 WAL
-│   ├── query.rs
-│   ├── event.rs
-│   ├── aggregator.rs
-│   ├── store.rs
-│   └── config.rs
-```
-
 ## 9. 实现说明与差异
 
 ### 9.1 已实现功能（Web API）
 
 当前实现已完成 Phase 1 和 Phase 2 的核心功能：
 
-| 组件 | 文件路径 | 说明 |
-|------|----------|------|
-| Admin Server | `src/api/admin.rs` | HTTP 服务器，支持端口随机分配 |
-| Handlers | `src/api/handlers.rs` | `/v1/stats/aggregate` 和 `/v1/stats/overview` 端点 |
-| Middleware | `src/api/middleware.rs` | Bearer Token 认证中间件 |
-| Module | `src/api/mod.rs` | API 模块导出 |
+| 组件         | 文件路径                | 说明                                               |
+|--------------|-------------------------|----------------------------------------------------|
+| Admin Server | `src/api/admin.rs`      | HTTP 服务器，支持端口随机分配                      |
+| Handlers     | `src/api/handlers.rs`   | `/v1/stats/aggregate` 和 `/v1/stats/overview` 端点 |
+| Middleware   | `src/api/middleware.rs` | Bearer Token 认证中间件                            |
+| Module       | `src/api/mod.rs`        | API 模块导出                                       |
 
 ### 9.2 设计与实现差异
 
-| 设计项 | 实现状态 | 说明 |
-|--------|----------|------|
-| `group_by` 参数 | ⚠️ 未实现 | 设计支持按 `model`/`backend`/`both` 分组，当前版本仅支持按 `model` + `backend` 联合分组返回 |
-| CLI 工具 | ✅ 已实现 | Phase 3 已完成，支持全部设计的命令 |
-| WAL 模式 | ✅ 已配置 | `.gitignore` 已添加 `*.db-shm` 和 `*.db-wal` 文件忽略 |
+| 设计项          | 实现状态   | 说明                                                                                        |
+|-----------------|------------|---------------------------------------------------------------------------------------------|
+| `group_by` 参数 | ⚠️ 未实现  | 设计支持按 `model`/`backend`/`both` 分组，当前版本仅支持按 `model` + `backend` 联合分组返回 |
+| CLI 工具        | ✅ 已实现  | Phase 3 已完成，支持全部设计的命令                                                          |
+| WAL 模式        | ✅ 已配置  | `.gitignore` 已添加 `*.db-shm` 和 `*.db-wal` 文件忽略                                       |
 
 ### 9.3 文件结构（实际实现）
 
-```
+```plaintext
 crates/statistics/
 ├── Cargo.toml          # 已添加 bin target 和 CLI 依赖
 ├── src/
@@ -566,6 +554,7 @@ crates/statistics/
 ## 10. 验收标准
 
 ### 10.1 Web API ✅
+
 - [x] 可以通过 curl 成功查询聚合统计
 - [x] 支持 Bearer Token 认证
 - [x] 返回符合设计的 JSON 格式
@@ -573,9 +562,11 @@ crates/statistics/
 - [x] 支持毫秒时间戳和 ISO8601 格式的时间参数
 
 **遗留项：**
+
 - [ ] `group_by` 参数支持（当前仅支持按 `model` + `backend` 联合分组）
 
 ### 10.2 CLI 工具 ✅
+
 - [x] 可以独立运行 `llm-stats` 命令
 - [x] 正确读取 `stats.db` 并显示事件列表
 - [x] `query` 命令过滤器功能正常工作
@@ -585,6 +576,7 @@ crates/statistics/
 - [x] REPL 交互循环正常工作（help、exit 等）
 
 **使用方法：**
+
 ```bash
 # 编译并运行 CLI 工具
 cargo run --bin llm-stats -- --db ./stats.db
@@ -594,6 +586,7 @@ cargo run --bin llm-stats
 ```
 
 ### 10.3 并发测试
+
 - [x] Gateway 进程持续写入时，Web API 可以正常读取
 - [x] Gateway 进程持续写入时，CLI 可以正常读取
 - [x] Web API 和 CLI 可以同时访问同一个数据库（通过 SQLite WAL 模式）

@@ -33,7 +33,6 @@ impl ReplApp {
             db_path: db_path.to_string(),
             retention_days: 30,
             write_buffer_size: 1000,
-            aggregation: Default::default(),
         };
         let store = StatsStoreManager::new(&config).await?;
         let editor = DefaultEditor::new()?;
