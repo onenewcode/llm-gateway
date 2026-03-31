@@ -4,6 +4,7 @@
 
 mod api;
 mod backend_node;
+mod concurrency_node;
 mod error;
 mod health_monitor;
 mod input_node;
@@ -14,6 +15,7 @@ mod serve;
 extern crate log;
 
 pub use api::admin::AdminServer;
+pub use concurrency_node::{ConcurrencyGuard, ConcurrencyNode};
 pub use error::GatewayError;
 pub use input_node::InputNode;
 pub use serve::serve;
@@ -32,6 +34,7 @@ use llm_gateway_config::{GatewayConfig, VirtualNode};
 use llm_gateway_protocols::Protocol;
 use sequence_node::SequenceNode;
 use serde_json::Value as Json;
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -75,18 +78,25 @@ pub type RouteResult = Result<Route, RouteError>;
 
 /// 路由结果，包含路由路径和后端信息
 pub struct Route {
+    /// 路由路径上的节点守卫列表
     /// 倒序：backend -> #n -> #n-1 -> ... -> model
-    pub nodes: Vec<Arc<dyn Node>>,
+    pub nodes: Vec<Box<dyn NodeGuard>>,
     pub backend: Backend,
 }
 
 impl Route {
     pub fn model_name(&self) -> &str {
-        self.nodes.last().map(|n| n.name()).unwrap_or("no model")
+        self.nodes
+            .last()
+            .map(|n| n.node().name())
+            .unwrap_or("no model")
     }
 
     pub fn backend_name(&self) -> &str {
-        self.nodes.first().map(|n| n.name()).unwrap_or("no backend")
+        self.nodes
+            .first()
+            .map(|n| n.node().name())
+            .unwrap_or("no backend")
     }
 }
 
@@ -107,7 +117,7 @@ pub enum RouteError {
 }
 
 /// 节点 Trait - 网关路由图中的节点接口
-pub trait Node: Send + Sync {
+pub trait Node: Send + Sync + Any {
     /// 获取节点名称
     fn name(&self) -> &str;
     /// 执行路由逻辑，返回路由结果
@@ -118,6 +128,35 @@ pub trait Node: Send + Sync {
     fn health(&self) -> Option<&Arc<HealthMonitor>> {
         None
     }
+    /// 将节点转换为 Any 以便进行 downcast
+    fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
+}
+
+/// 节点守卫 trait
+///
+/// 用于在 Route 中携带节点引用，同时通过 Drop 实现资源清理
+/// 注意：此 trait 不继承 Clone，因此是对象安全的
+pub trait NodeGuard: Send + Sync {
+    /// 获取底层节点引用
+    fn node(&self) -> &dyn Node;
+}
+
+/// 简单守卫，用于包装不需要特殊清理的节点
+pub struct SimpleGuard {
+    node: Arc<dyn Node>,
+}
+
+impl SimpleGuard {
+    /// 创建一个新的 SimpleGuard
+    pub fn new(node: Arc<dyn Node>) -> Self {
+        Self { node }
+    }
+}
+
+impl NodeGuard for SimpleGuard {
+    fn node(&self) -> &dyn Node {
+        self.node.as_ref()
+    }
 }
 
 /// 根据配置构建网关节点图
@@ -127,11 +166,14 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
     use llm_gateway_config::Node as ConfigNode;
 
     /// 占位节点，用于在连接建立前保存节点名称引用
-    struct PlaceHolder(Arc<str>);
+    struct PlaceHolder(String);
 
     impl Node for PlaceHolder {
         fn name(&self) -> &str {
             &self.0
+        }
+        fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+            self
         }
         fn route(&self, _: &RoutePayload) -> RouteResult {
             unimplemented!()
@@ -150,17 +192,19 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
 
     let mut ans = Vec::new();
     let mut nodes: HashMap<&str, Arc<dyn Node>> = HashMap::new();
+    // 存储需要设置后继的 ConcurrencyNode: (节点名称, 后继名称)
+    let mut concurrency_successors: Vec<(&str, String)> = Vec::new();
     for (name, node) in &config.nodes {
         match node {
             ConfigNode::Input(n) => ans.push(Arc::new(InputNode {
-                name: name.clone(),
+                name: name.to_string(),
                 port: n.port,
                 models: RwLock::new(
                     n.models
                         .iter()
-                        .map(|name| {
-                            let name: Arc<str> = name.as_str().into();
-                            (name.clone(), Arc::new(PlaceHolder(name)) as _)
+                        .map(|model_name| {
+                            let name_string = model_name.clone();
+                            (name_string, Arc::new(PlaceHolder(model_name.clone())) as _)
                         })
                         .collect(),
                 ),
@@ -171,15 +215,20 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
                     nodes.insert(
                         &**name,
                         Arc::new(SequenceNode {
-                            name: name.clone(),
+                            name: name.to_string(),
                             successors: RwLock::new(
                                 successors
                                     .iter()
-                                    .map(|name| Arc::new(PlaceHolder(name.as_str().into())) as _)
+                                    .map(|name| Arc::new(PlaceHolder(name.clone())) as _)
                                     .collect(),
                             ),
                         }) as _,
                     );
+                }
+                VirtualNode::Concurrency { max, successor } => {
+                    let node = Arc::new(ConcurrencyNode::new(name.to_string(), *max));
+                    concurrency_successors.push((name, successor.clone()));
+                    nodes.insert(&**name, node.clone() as _);
                 }
             },
             ConfigNode::Backend(n) => {
@@ -188,13 +237,23 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
                 nodes.insert(
                     &**name,
                     Arc::new(BackendNode {
-                        name: name.clone(),
+                        name: name.to_string(),
                         base_url: n.base_url.clone(),
                         api_key: n.api_key.clone(),
                         health: health_monitor,
                     }) as _,
                 );
             }
+        }
+    }
+
+    // 设置 ConcurrencyNode 的后继节点
+    for (node_name, successor_name) in concurrency_successors {
+        if let Some(node) = nodes.get(node_name)
+            && let Ok(concurrency_node) = node.clone().into_any().downcast::<ConcurrencyNode>()
+            && let Some(successor) = nodes.get(successor_name.as_str())
+        {
+            concurrency_node.set_successor(successor.clone());
         }
     }
 

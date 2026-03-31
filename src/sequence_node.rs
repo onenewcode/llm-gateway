@@ -2,8 +2,9 @@
 //!
 //! 实现顺序路由策略，按顺序尝试每个后端直到成功
 
-use crate::{Node, RouteError, RoutePayload, RouteResult};
+use crate::{Node, RouteError, RoutePayload, RouteResult, SimpleGuard};
 use std::{
+    any::Any,
     collections::HashMap,
     sync::{Arc, RwLock},
 };
@@ -13,7 +14,7 @@ use std::{
 /// 按顺序尝试多个后端节点，直到找到一个可用的
 pub(crate) struct SequenceNode {
     /// 节点名称
-    pub(super) name: Arc<str>,
+    pub(super) name: String,
     /// 后继节点列表
     pub(super) successors: RwLock<Vec<Arc<dyn Node>>>,
 }
@@ -24,12 +25,19 @@ impl Node for SequenceNode {
         &self.name
     }
 
+    /// 将节点转换为 Any
+    fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+
     /// 顺序尝试每个后继节点，返回第一个成功的路由结果
     fn route(&self, payload: &RoutePayload) -> RouteResult {
         for successor in &*self.successors.read().unwrap() {
             match successor.route(payload) {
                 Ok(mut route) => {
-                    route.nodes.push(successor.clone());
+                    route
+                        .nodes
+                        .push(Box::new(SimpleGuard::new(successor.clone())));
                     return Ok(route);
                 }
                 Err(e) => match e {

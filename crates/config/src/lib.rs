@@ -192,7 +192,7 @@ impl FromStr for GatewayConfig {
         }
 
         // 解析虚拟节点 [node.*]
-        // 虚拟节点定义路由策略，目前支持 sequence（顺序尝试）
+        // 虚拟节点定义路由策略，目前支持 sequence（顺序尝试）和 concurrency（并发控制）
         if let Some(node_table) = root_table.get("node").and_then(|v| v.as_table()) {
             for (name, value) in node_table {
                 // 检查节点名称是否重复
@@ -200,19 +200,61 @@ impl FromStr for GatewayConfig {
                     return Err(ConfigParseError::DuplicateName(name.clone()));
                 }
 
-                // 使用 let-chain 语法解析 sequence 字段
-                if let Some(node_config) = value.as_table()
-                    && let Some(sequence) = node_config.get("sequence").and_then(|v| v.as_array())
-                {
-                    let seq = sequence
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect();
+                if let Some(node_config) = value.as_table() {
+                    // 解析 sequence 字段
+                    if let Some(sequence) = node_config.get("sequence").and_then(|v| v.as_array()) {
+                        let seq = sequence
+                            .iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect();
 
-                    nodes.insert(
-                        name.clone().into(),
-                        Node::Virtual(VirtualNode::Sequence(seq)),
-                    );
+                        nodes.insert(
+                            name.clone().into(),
+                            Node::Virtual(VirtualNode::Sequence(seq)),
+                        );
+                    }
+                    // 解析 concurrency 配置
+                    else if let Some(concurrency_config) = node_config.get("concurrency") {
+                        // 解析 max 字段
+                        let max_val = concurrency_config
+                            .get("max")
+                            .and_then(|v| v.as_integer())
+                            .ok_or_else(|| {
+                                ConfigParseError::MissingField(
+                                    "max".to_string(),
+                                    format!("node.{name}"),
+                                )
+                            })?;
+
+                        // 验证 max 为正整数
+                        if max_val <= 0 {
+                            return Err(ConfigParseError::ParseError(format!(
+                                "node.{name}.concurrency.max must be a positive integer, got: {max_val}"
+                            )));
+                        }
+                        let max = max_val as usize;
+
+                        // 解析 successor 字段（单后继）
+                        let successor = concurrency_config
+                            .get("successor")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                            .ok_or_else(|| {
+                                ConfigParseError::MissingField(
+                                    "successor".to_string(),
+                                    format!("node.{name}"),
+                                )
+                            })?;
+
+                        nodes.insert(
+                            name.clone().into(),
+                            Node::Virtual(VirtualNode::Concurrency { max, successor }),
+                        );
+                    } else {
+                        return Err(ConfigParseError::ParseError(format!(
+                            "node.{name} must have either 'sequence' or 'concurrency' field"
+                        )));
+                    }
                 }
             }
         }
@@ -514,5 +556,136 @@ auth-token = "secret-token"
 
         // Default should be None (not specified)
         assert!(config.admin.is_none());
+    }
+
+    /// 测试并发控制配置完整解析
+    #[test]
+    fn test_parse_concurrency_full_config() {
+        let toml_str = r#"
+[input.service]
+port = 8000
+models = ["qwen3.5-35b-a3b"]
+
+[node."qwen3.5-35b-a3b"]
+concurrency = { max = 100, successor = "sglang-backend" }
+
+[backend]
+"sglang-backend" = "http://172.17.250.163:30001"
+"#;
+
+        let result = GatewayConfig::from_str(toml_str);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+
+        // Verify input node
+        assert!(config.nodes.contains_key("service"));
+
+        // Verify concurrency node
+        assert!(config.nodes.contains_key("qwen3.5-35b-a3b"));
+        match &config.nodes["qwen3.5-35b-a3b"] {
+            Node::Virtual(virtual_node) => {
+                assert_eq!(virtual_node.concurrency(), Some(100));
+                assert_eq!(virtual_node.sequence(), &["sglang-backend"]);
+            }
+            _ => panic!("Expected Virtual node"),
+        }
+
+        // Verify backends
+        assert!(config.nodes.contains_key("sglang-backend"));
+    }
+
+    /// 测试并发控制配置解析和节点创建
+    #[test]
+    fn test_concurrency_config_parsing() {
+        let toml_str = r#"
+[input.service]
+port = 8000
+models = ["test-model"]
+
+[node."test-model"]
+concurrency = { max = 2, successor = "backend-1" }
+
+[backend]
+"backend-1" = "http://localhost:8001"
+"#;
+
+        let config = GatewayConfig::from_str(toml_str).unwrap();
+
+        // Verify concurrency node exists
+        assert!(config.nodes.contains_key("test-model"));
+        match &config.nodes["test-model"] {
+            Node::Virtual(r#virtual) => {
+                assert_eq!(r#virtual.concurrency(), Some(2));
+                assert_eq!(r#virtual.sequence(), &["backend-1"]);
+            }
+            _ => panic!("Expected Virtual node"),
+        }
+    }
+
+    /// 测试完整配置解析（包含 sequence 和 concurrency）
+    #[test]
+    fn test_full_config_with_concurrency() {
+        let toml_str = r#"
+[input.service]
+port = 8000
+models = ["qwen-35b", "qwen-72b"]
+
+[node."qwen-35b"]
+concurrency = { max = 100, successor = "model-router" }
+
+[node."model-router"]
+sequence = ["sglang-35b", "aliyun"]
+
+[node."qwen-72b"]
+sequence = ["sglang-72b", "aliyun"]
+
+[backend]
+"sglang-35b" = "http://172.17.250.163:30001"
+"sglang-72b" = "http://172.17.250.163:30002"
+
+[backend.aliyun]
+base-url = { anthropic = "https://dashscope.aliyuncs.com/apps/anthropic" }
+api-key = "$ALIYUN_API_KEY"
+"#;
+
+        let config = GatewayConfig::from_str(toml_str).unwrap();
+
+        // Verify input node
+        assert!(config.nodes.contains_key("service"));
+
+        // Verify concurrency node
+        assert!(config.nodes.contains_key("qwen-35b"));
+        match &config.nodes["qwen-35b"] {
+            Node::Virtual(r#virtual) => {
+                assert_eq!(r#virtual.concurrency(), Some(100));
+                assert_eq!(r#virtual.sequence(), &["model-router"]);
+            }
+            _ => panic!("Expected Virtual node"),
+        }
+
+        // Verify model-router sequence node
+        assert!(config.nodes.contains_key("model-router"));
+        match &config.nodes["model-router"] {
+            Node::Virtual(r#virtual) => {
+                assert_eq!(r#virtual.concurrency(), None);
+                assert_eq!(r#virtual.sequence(), &["sglang-35b", "aliyun"]);
+            }
+            _ => panic!("Expected Virtual node"),
+        }
+
+        // Verify sequence node
+        assert!(config.nodes.contains_key("qwen-72b"));
+        match &config.nodes["qwen-72b"] {
+            Node::Virtual(r#virtual) => {
+                assert_eq!(r#virtual.concurrency(), None);
+                assert_eq!(r#virtual.sequence(), &["sglang-72b", "aliyun"]);
+            }
+            _ => panic!("Expected Virtual node"),
+        }
+
+        // Verify backends
+        assert!(config.nodes.contains_key("sglang-35b"));
+        assert!(config.nodes.contains_key("sglang-72b"));
+        assert!(config.nodes.contains_key("aliyun"));
     }
 }

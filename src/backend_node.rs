@@ -5,10 +5,11 @@ use crate::{
 };
 use llm_gateway_config::{BaseUrl, UrlResult};
 use llm_gateway_protocols::Protocol;
+use std::any::Any;
 use std::{collections::HashMap, sync::Arc};
 
 pub(crate) struct BackendNode {
-    pub(super) name: Arc<str>,
+    pub(super) name: String,
     pub(super) base_url: BaseUrl,
     pub(super) api_key: Option<String>,
     pub(super) health: Arc<HealthMonitor>,
@@ -17,6 +18,10 @@ pub(crate) struct BackendNode {
 impl Node for BackendNode {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
     }
 
     fn route(&self, payload: &RoutePayload) -> RouteResult {

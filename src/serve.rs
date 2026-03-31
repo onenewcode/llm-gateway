@@ -158,7 +158,7 @@ async fn handle_request(
                 let mut routing_path = format!("[{}]", input_node.port);
                 for node in route.nodes.iter().rev() {
                     routing_path.push_str("->");
-                    routing_path.push_str(node.name());
+                    routing_path.push_str(node.node().name());
                 }
                 info!("Routing path: {routing_path}");
 
@@ -260,7 +260,7 @@ async fn handle_route_success(
     } else {
         forward_to_foreign(payload, backend, client).await
     };
-    if let Some(health) = nodes.first().and_then(|node| node.health()) {
+    if let Some(health) = nodes.first().and_then(|node| node.node().health()) {
         match result {
             Ok(_) => health.record_success(),
             Err(_) => health.record_failure(),
@@ -304,7 +304,7 @@ async fn handle_models_request(input_node: &InputNode) -> Result<Response<BoxBod
         .keys()
         .map(|name| {
             json!({
-                "id": name.as_ref(),
+                "id": name.as_str(),
                 "object": "model",
                 "created": 0,
                 "owned_by": "llm-gateway"
