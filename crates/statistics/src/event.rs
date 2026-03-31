@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct RoutingEvent {
     /// 毫秒级 Unix 时间戳
-    pub timestamp: i64,
+    pub timestamp: u64,
     /// 请求来源 IPv4 地址 (u32 网络字节序)
     pub remote_addr: u32,
     /// 请求来源端口
@@ -41,7 +41,7 @@ pub struct RoutingEventBuilder(RoutingEvent);
 
 impl RoutingEventBuilder {
     /// 创建新的 Builder，必需参数为时间戳和输入端口
-    pub fn new(timestamp: i64, input_port: u16) -> Self {
+    pub fn new(timestamp: u64, input_port: u16) -> Self {
         Self(RoutingEvent {
             timestamp,
             input_port,
@@ -136,7 +136,7 @@ impl RoutingEventBuilder {
 
 impl RoutingEvent {
     /// 创建新的 Builder
-    pub fn builder(timestamp: i64, input_port: u16) -> RoutingEventBuilder {
+    pub fn builder(timestamp: u64, input_port: u16) -> RoutingEventBuilder {
         RoutingEventBuilder::new(timestamp, input_port)
     }
 }

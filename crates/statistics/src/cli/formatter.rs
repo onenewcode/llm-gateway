@@ -51,7 +51,7 @@ fn format_table(events: &[RoutingEvent]) -> String {
 
     // Rows
     for event in events {
-        let timestamp: DateTime<Local> = DateTime::from_timestamp_millis(event.timestamp)
+        let timestamp: DateTime<Local> = DateTime::from_timestamp_millis(event.timestamp as i64)
             .unwrap_or_default()
             .with_timezone(&Local);
 
@@ -86,7 +86,7 @@ fn format_json(events: &[RoutingEvent]) -> String {
     let json_events: Vec<EventJson> = events
         .iter()
         .map(|e| {
-            let timestamp: DateTime<Local> = DateTime::from_timestamp_millis(e.timestamp)
+            let timestamp: DateTime<Local> = DateTime::from_timestamp_millis(e.timestamp as i64)
                 .unwrap_or_default()
                 .with_timezone(&Local);
 
@@ -119,7 +119,7 @@ fn format_csv(events: &[RoutingEvent]) -> String {
 
     // Rows
     for event in events {
-        let timestamp: DateTime<Local> = DateTime::from_timestamp_millis(event.timestamp)
+        let timestamp: DateTime<Local> = DateTime::from_timestamp_millis(event.timestamp as i64)
             .unwrap_or_default()
             .with_timezone(&Local);
 

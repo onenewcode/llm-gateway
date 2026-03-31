@@ -15,7 +15,9 @@ pub use aggregator::Aggregator;
 pub use cli::{OutputFormat, format_events};
 pub use config::StatisticsConfig;
 pub use event::{RoutingEvent, RoutingEventBuilder};
-pub use query::{AggQuery, AggStats, EventFilter, StatsQueryBuilder, TimeGranularity};
+pub use query::{
+    AggQuery, AggStats, AggSummary, AggregateResult, EventFilter, StatsQueryBuilder, parse_time,
+};
 pub use sqlite::SqliteStore;
 pub use store::StatsStoreManager;
 

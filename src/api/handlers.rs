@@ -5,46 +5,38 @@ use chrono::DateTime;
 use http::header::CONTENT_TYPE;
 use http_body_util::Full;
 use hyper::{Request, Response, StatusCode};
-use llm_gateway_statistics::{StatsStoreManager, TimeGranularity};
-use std::sync::Arc;
+use llm_gateway_statistics::{StatsStoreManager, parse_time};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::api::middleware::AuthMiddleware;
 use log::error;
 
 type Body = Full<Bytes>;
 
+/// Helper function to create parameter error response
+fn invalid_param_error(message: impl Into<String>) -> Response<Body> {
+    json_response(
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({
+            "message": message.into(),
+            "error_type": "INVALID_PARAMS"
+        }),
+    )
+}
+
 /// 从 URL 查询字符串解析时间戳（支持毫秒时间戳或 ISO8601）
-fn parse_timestamp(value: &str) -> Option<i64> {
-    // 先尝试解析为毫秒时间戳
-    if let Ok(ts) = value.parse::<i64>() {
-        return Some(ts);
+fn parse_timestamp(value: impl AsRef<str>) -> Option<i64> {
+    let value = value.as_ref();
+    if let Ok(ts) = value.parse() {
+        // 先尝试解析为毫秒时间戳
+        Some(ts)
+    } else if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
+        // 尝试解析为 ISO8601/RFC3339
+        Some(dt.timestamp_millis())
+    } else {
+        // 均失败
+        None
     }
-    // 尝试解析为 ISO8601/RFC3339
-    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
-        return Some(dt.timestamp_millis());
-    }
-    None
-}
-
-/// 解析粒度参数
-fn parse_granularity(value: Option<&str>) -> TimeGranularity {
-    match value.unwrap_or("1h") {
-        "5m" => TimeGranularity::FiveMinutes,
-        "15m" => TimeGranularity::FifteenMinutes,
-        "1h" => TimeGranularity::OneHour,
-        "1d" => TimeGranularity::OneDay,
-        _ => TimeGranularity::OneHour,
-    }
-}
-
-/// 从请求 URI 提取查询参数
-fn extract_query_param(uri: &hyper::Uri, key: &str) -> Option<String> {
-    uri.query().and_then(|q| {
-        q.split('&').find_map(|pair| {
-            let (k, v) = pair.split_once('=')?;
-            if k == key { Some(v.to_string()) } else { None }
-        })
-    })
 }
 
 pub async fn handle_request(
@@ -58,7 +50,6 @@ pub async fn handle_request(
         return Ok(json_response(
             StatusCode::UNAUTHORIZED,
             serde_json::json!({
-                "code": 401,
                 "message": "Unauthorized",
                 "error_type": "UNAUTHORIZED"
             }),
@@ -75,7 +66,6 @@ pub async fn handle_request(
         _ => Ok(json_response(
             StatusCode::NOT_FOUND,
             serde_json::json!({
-                "code": 404,
                 "message": "Not found",
                 "error_type": "NOT_FOUND"
             }),
@@ -88,55 +78,103 @@ async fn handle_aggregate(
     store: Arc<StatsStoreManager>,
 ) -> Result<Response<Body>, hyper::Error> {
     let uri = req.uri();
+    let mut query = uri.query().map_or_else(Default::default, |q| {
+        q.split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .collect::<HashMap<&str, &str>>()
+    });
 
-    // 只计算一次当前时间，避免竞争条件
     let now = chrono::Utc::now().timestamp_millis();
 
-    // 解析时间参数
-    let start_time = extract_query_param(uri, "start_time")
-        .and_then(|v| parse_timestamp(&v))
-        .unwrap_or(now - 3_600_000);
+    // Parse time_range parameter (supports N+unit format)
+    let time_range = match query.remove("time_range") {
+        Some(value) => match parse_time(value) {
+            Ok(secs) => Some(secs as i64 * 1000),
+            Err(e) => {
+                return Ok(invalid_param_error(format!(
+                    "Invalid time_range format: {e}"
+                )));
+            }
+        },
+        None => None,
+    };
 
-    let end_time = extract_query_param(uri, "end_time")
-        .and_then(|v| parse_timestamp(&v))
-        .unwrap_or(now);
+    // Parse start_time and end_time
+    let start_time_param = query.remove("start_time").and_then(parse_timestamp);
+    let end_time_param = query.remove("end_time").and_then(parse_timestamp);
 
-    // 验证时间范围
+    const HOUR_MS: i64 = 60 * 60 * 1000;
+
+    // Resolve time range based on provided parameters
+    let (start_time, end_time) = match (start_time_param, end_time_param, time_range) {
+        (Some(st), Some(et), Some(tr)) => {
+            // All three provided - validate consistency
+            if et - st != tr {
+                return Ok(invalid_param_error(
+                    "time_range does not match end_time - start_time",
+                ));
+            }
+            (st, et)
+        }
+
+        // Only start and end time
+        (Some(st), Some(et), None) => (st, et),
+        // start_time + time_range -> calculate end_time
+        (Some(st), None, Some(tr)) => (st, st + tr),
+        // end_time + time_range -> calculate start_time
+        (None, Some(et), Some(tr)) => (et - tr, et),
+
+        // Only start_time -> use end_time = start_time + 1h
+        (Some(st), None, None) => (st, st + HOUR_MS),
+        // Only end_time -> use start_time = end_time - 1h
+        (None, Some(et), None) => (et - HOUR_MS, et),
+        // Only time_range -> use end_time = now
+        (None, None, Some(tr)) => (now - tr, now),
+
+        // Default: last 1 hour
+        (None, None, None) => (now - HOUR_MS, now),
+    };
+
+    // Validate time range
     if start_time >= end_time {
-        return Ok(json_response(
-            StatusCode::BAD_REQUEST,
-            serde_json::json!({
-                "code": 400,
-                "message": "start_time must be less than end_time",
-                "error_type": "INVALID_PARAMS"
-            }),
-        ));
+        return Ok(invalid_param_error("start_time must be less than end_time"));
     }
 
-    // 解析其他参数
-    let granularity = parse_granularity(extract_query_param(uri, "granularity").as_deref());
-    let model = extract_query_param(uri, "model");
-    let backend = extract_query_param(uri, "backend");
+    // Parse window_size (granularity)
+    let window_size_secs = match query.remove("window_size") {
+        Some(value) => match parse_time(value) {
+            Ok(secs) => secs,
+            Err(e) => {
+                return Ok(invalid_param_error(format!(
+                    "Invalid window_size format: {e}"
+                )));
+            }
+        },
+        None => 3600, // Default to 1h
+    };
+    let model = query.remove("model").map(|s| s.to_string());
+    let backend = query.remove("backend").map(|s| s.to_string());
 
-    // 构建查询
+    // Build query
     let query = llm_gateway_statistics::AggQuery {
-        start_time,
-        end_time,
-        window_size: std::num::NonZeroU64::new(granularity.as_seconds() as u64)
+        start_time: start_time as u64,
+        end_time: end_time as u64,
+        window_size: std::num::NonZeroU64::new(window_size_secs)
             .unwrap_or_else(|| std::num::NonZeroU64::new(3600).unwrap()),
-        model: model.clone(),
-        backend: backend.clone(),
+        model,
+        backend,
     };
 
     // 执行查询
     match store.get_aggregated_stats(query).await {
-        Ok(stats) => {
+        Ok(result) => {
             // 转换为响应格式
-            let items: Vec<_> = stats
+            let items: Vec<_> = result
+                .stats
                 .iter()
                 .map(|s| {
                     serde_json::json!({
-                        "window_start": chrono::DateTime::from_timestamp_millis(s.window_start)
+                        "window_start": chrono::DateTime::from_timestamp_millis(s.window_start as i64)
                             .map(|dt| dt.to_rfc3339())
                             .unwrap_or_default(),
                         "window_size_seconds": s.window_size / 1000,
@@ -155,14 +193,23 @@ async fn handle_aggregate(
                 })
                 .collect();
 
+            // Summary as separate field
+            let summary = serde_json::json!({
+                "window_start": chrono::DateTime::from_timestamp_millis(result.summary.window_start as i64)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default(),
+                "window_size_seconds": result.summary.window_size_seconds,
+                "stop_reason": result.summary.stop_reason,
+            });
+
             Ok(json_response(
                 StatusCode::OK,
                 serde_json::json!({
-                    "code": 200,
                     "message": "success",
                     "data": {
                         "total": items.len(),
-                        "items": items
+                        "items": items,
+                        "summary": summary
                     }
                 }),
             ))
@@ -172,7 +219,6 @@ async fn handle_aggregate(
             Ok(json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 serde_json::json!({
-                    "code": 500,
                     "message": "Failed to query statistics",
                     "error_type": "INTERNAL_ERROR"
                 }),
@@ -208,7 +254,6 @@ async fn handle_overview(
                 return Ok(json_response(
                     StatusCode::OK,
                     serde_json::json!({
-                        "code": 200,
                         "message": "success",
                         "data": {
                             "time_range": {
@@ -286,7 +331,6 @@ async fn handle_overview(
             Ok(json_response(
                 StatusCode::OK,
                 serde_json::json!({
-                    "code": 200,
                     "message": "success",
                     "data": {
                         "time_range": {
@@ -311,7 +355,6 @@ async fn handle_overview(
             Ok(json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 serde_json::json!({
-                    "code": 500,
                     "message": "Failed to query overview",
                     "error_type": "INTERNAL_ERROR"
                 }),
@@ -344,58 +387,13 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_granularity() {
-        assert!(matches!(
-            parse_granularity(Some("5m")),
-            TimeGranularity::FiveMinutes
-        ));
-        assert!(matches!(
-            parse_granularity(Some("1h")),
-            TimeGranularity::OneHour
-        ));
-        assert!(matches!(parse_granularity(None), TimeGranularity::OneHour));
-    }
-
-    #[test]
-    fn test_extract_query_param() {
-        let uri: hyper::Uri = "/v1/stats?start=123&end=456".parse().unwrap();
-        assert_eq!(extract_query_param(&uri, "start"), Some("123".to_string()));
-        assert_eq!(extract_query_param(&uri, "end"), Some("456".to_string()));
-        assert_eq!(extract_query_param(&uri, "missing"), None);
-    }
-
-    #[test]
-    fn test_extract_query_param_no_query() {
-        let uri: hyper::Uri = "/v1/stats".parse().unwrap();
-        assert_eq!(extract_query_param(&uri, "start"), None);
-    }
-
-    #[test]
-    fn test_extract_query_param_prefix_collision() {
-        let uri: hyper::Uri = "/v1/stats?start_time=123&start_time_extra=456"
-            .parse()
-            .unwrap();
-        assert_eq!(
-            extract_query_param(&uri, "start_time"),
-            Some("123".to_string())
-        );
-        assert_eq!(
-            extract_query_param(&uri, "start_time_extra"),
-            Some("456".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_query_param_exact_match() {
-        let uri: hyper::Uri = "/v1/stats?model=gpt-4&model_name=other".parse().unwrap();
-        assert_eq!(
-            extract_query_param(&uri, "model"),
-            Some("gpt-4".to_string())
-        );
-        assert_eq!(
-            extract_query_param(&uri, "model_name"),
-            Some("other".to_string())
-        );
+    fn test_parse_time() {
+        assert_eq!(parse_time("30s"), Ok(30));
+        assert_eq!(parse_time("5m"), Ok(300));
+        assert_eq!(parse_time("1h"), Ok(3600));
+        assert_eq!(parse_time("1d"), Ok(86400));
+        assert_eq!(parse_time("3600"), Ok(3600));
+        assert_eq!(parse_time(""), Ok(3600)); // Default
     }
 
     #[test]

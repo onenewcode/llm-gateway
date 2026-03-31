@@ -53,6 +53,10 @@ enabled = true
 db-path = "stats.db"
 # 数据保留天数（默认 7）
 retention-days = 7
+# 写入缓冲区大小（默认 1000）
+write-buffer-size = 1000
+# 聚合查询最大返回行数（默认 256）
+aggregate-limit = 256
 
 # ============================================
 # 管理 API 配置

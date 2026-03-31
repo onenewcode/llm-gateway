@@ -23,7 +23,7 @@ pub use api::admin::AdminServer;
 // 统计模块重新导出
 pub use llm_gateway_statistics::{
     AggQuery, AggStats, EventFilter, RoutingEvent, StatisticsConfig, StatsQueryBuilder,
-    StatsStoreManager, TimeGranularity,
+    StatsStoreManager, parse_time,
 };
 
 use crate::{

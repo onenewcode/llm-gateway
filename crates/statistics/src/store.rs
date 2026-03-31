@@ -4,7 +4,7 @@ use crate::Result;
 use crate::StatisticsError::DatabaseError;
 use crate::config::StatisticsConfig;
 use crate::event::RoutingEvent;
-use crate::query::{AggQuery, AggStats, EventFilter};
+use crate::query::{AggQuery, AggSummary, AggregateResult, EventFilter};
 use crate::sqlite::SqliteStore;
 use log::warn;
 use std::sync::Arc;
@@ -16,6 +16,8 @@ pub struct StatsStoreManager {
     store: Arc<SqliteStore>,
     /// 用于缓冲事件写入的通道发送端
     tx: mpsc::Sender<RoutingEvent>,
+    /// 聚合查询最大返回行数
+    aggregate_limit: usize,
 }
 
 impl StatsStoreManager {
@@ -39,7 +41,16 @@ impl StatsStoreManager {
             Self::background_writer(store_clone, rx).await;
         });
 
-        Ok(Self { store, tx })
+        Ok(Self {
+            store,
+            tx,
+            aggregate_limit: config.aggregate_limit,
+        })
+    }
+
+    /// 获取聚合限额
+    pub fn aggregate_limit(&self) -> usize {
+        self.aggregate_limit
     }
 
     /// 后台写入任务 - 批量写入以减少锁竞争
@@ -113,14 +124,19 @@ impl StatsStoreManager {
     }
 
     /// 获取聚合统计
-    pub async fn get_aggregated_stats(&self, query: AggQuery) -> Result<Vec<AggStats>> {
+    pub async fn get_aggregated_stats(&self, query: AggQuery) -> Result<AggregateResult> {
         let store = self.store.clone();
-        tokio::task::spawn_blocking(move || -> Result<Vec<AggStats>> {
+        let limit = self.aggregate_limit;
+        tokio::task::spawn_blocking(move || -> Result<AggregateResult> {
             let stats = store.query_aggregated_table(&query)?;
             if !stats.is_empty() {
-                return Ok(stats);
+                // Convert Vec<AggStats> to AggregateResult with finished summary
+                return Ok(AggregateResult {
+                    stats,
+                    summary: AggSummary::finished(query.end_time),
+                });
             }
-            store.compute_aggregation(&query)
+            store.compute_aggregation(&query, Some(limit))
         })
         .await
         .map_err(|e| DatabaseError(format!("Query failed: {e}")))?

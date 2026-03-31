@@ -1,7 +1,7 @@
 //! SQLite 存储实现模块
 
 use crate::event::RoutingEvent;
-use crate::query::{AggQuery, AggStats, EventFilter};
+use crate::query::{AggQuery, AggStats, AggSummary, AggregateResult, EventFilter};
 use crate::{Result, StatisticsError};
 use rusqlite::{Connection, params};
 use std::sync::{Arc, Mutex};
@@ -124,7 +124,7 @@ impl SqliteStore {
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             ",
             params![
-                event.timestamp,
+                event.timestamp as i64,
                 event.remote_addr,
                 event.remote_port,
                 event.method,
@@ -230,7 +230,7 @@ impl SqliteStore {
     /// 将数据库行映射到 RoutingEvent
     fn map_row_to_event(row: &rusqlite::Row) -> rusqlite::Result<RoutingEvent> {
         Ok(RoutingEvent {
-            timestamp: row.get(0)?,
+            timestamp: row.get::<_, i64>(0)? as u64,
             remote_addr: row.get(1)?,
             remote_port: row.get(2)?,
             method: row.get(3)?,
@@ -248,10 +248,14 @@ impl SqliteStore {
     }
 
     /// 计算聚合统计
-    pub fn compute_aggregation(&self, query: &AggQuery) -> Result<Vec<AggStats>> {
+    pub fn compute_aggregation(
+        &self,
+        query: &AggQuery,
+        limit: Option<usize>,
+    ) -> Result<AggregateResult> {
         let events = self.query_events_internal(&EventFilter {
-            start_time: Some(query.start_time),
-            end_time: Some(query.end_time),
+            start_time: Some(query.start_time as i64),
+            end_time: Some(query.end_time as i64),
             model: query.model.clone(),
             backend: query.backend.clone(),
             success: None,
@@ -262,6 +266,9 @@ impl SqliteStore {
         Ok(crate::aggregator::Aggregator::aggregate(
             &events,
             query.window_size,
+            limit.unwrap_or(usize::MAX),
+            query.start_time,
+            query.end_time,
         ))
     }
 
@@ -287,8 +294,8 @@ impl SqliteStore {
 
         // 计算窗口起始范围
         let window_size = query.window_size.get() as i64;
-        let start_window = (query.start_time / 1000 / window_size) * window_size * 1000;
-        let end_window = (query.end_time / 1000 / window_size) * window_size * 1000;
+        let start_window = (query.start_time as i64 / 1000 / window_size) * window_size * 1000;
+        let end_window = (query.end_time as i64 / 1000 / window_size) * window_size * 1000;
 
         sql_parts.push("AND window_start >= ? AND window_start <= ?".to_string());
         param_values.push(rusqlite::types::Value::Integer(start_window));
@@ -339,8 +346,8 @@ impl SqliteStore {
     /// 将数据库行映射到 AggStats
     fn map_row_to_agg_stats(row: &rusqlite::Row) -> rusqlite::Result<AggStats> {
         Ok(AggStats {
-            window_start: row.get(0)?,
-            window_size: row.get(1)?,
+            window_start: row.get::<_, i64>(0)? as u64,
+            window_size: row.get::<_, i64>(1)? as u64,
             model: row.get(2)?,
             backend: row.get(3)?,
             total_requests: row.get(4)?,
@@ -420,20 +427,23 @@ impl SqliteStore {
     }
 
     /// 获取聚合统计（异步包装）
-    pub async fn get_aggregated_stats(&self, query: AggQuery) -> Result<Vec<AggStats>> {
+    pub async fn get_aggregated_stats(&self, query: AggQuery) -> Result<AggregateResult> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
             // 先尝试从聚合表查询
             let stats = store.query_aggregated_table(&query)?;
             if !stats.is_empty() {
-                return Ok(stats);
+                return Ok(AggregateResult {
+                    stats,
+                    summary: AggSummary::finished(query.end_time),
+                });
             }
 
             // 如果没有预计算数据，实时计算
-            store.compute_aggregation(&query)
+            store.compute_aggregation(&query, None)
         })
         .await
-        .map_err(|e| StatisticsError::DatabaseError(format!("Spawn failed: {}", e)))?
+        .map_err(|e| StatisticsError::DatabaseError(format!("Spawn failed: {e}")))?
     }
 
     /// 清理过期数据（异步包装）

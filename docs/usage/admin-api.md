@@ -73,18 +73,27 @@ curl http://localhost:8080/v1/stats/overview
 
 **请求参数**：
 
-| 参数          | 类型   | 必填 | 默认值   | 说明                           |
-|:-------------:|:------:|:----:|:--------:|--------------------------------|
-| `start_time`  | string | 否   | 1 小时前 | 毫秒时间戳或 ISO8601           |
-| `end_time`    | string | 否   | 现在     | 毫秒时间戳或 ISO8601           |
-| `granularity` | string | 否   | `1h`     | 时间粒度：`5m`/`15m`/`1h`/`1d` |
-| `model`       | string | 否   | -        | 过滤特定模型                   |
-| `backend`     | string | 否   | -        | 过滤特定后端                   |
+| 参数           | 类型   | 必填 | 默认值   | 说明                                              |
+|:--------------:|:------:|:----:|:--------:|---------------------------------------------------|
+| `start_time`   | string | 否   | 1 小时前 | 毫秒时间戳或 ISO8601                              |
+| `end_time`     | string | 否   | 现在     | 毫秒时间戳或 ISO8601                              |
+| `time_range`   | string | 否   | -        | 时间范围：`5m`/`15m`/`1h`/`1d`，与 start/end 互斥 |
+| `window_size`  | string | 否   | `1h`     | 聚合窗口大小：`5m`/`15m`/`1h`/`1d`                |
+| `model`        | string | 否   | -        | 过滤特定模型                                      |
+| `backend`      | string | 否   | -        | 过滤特定后端                                      |
 
 时间格式示例：
 
 - 毫秒时间戳：`1743004800000`
 - ISO8601：`2026-03-30T10:00:00Z`
+- 时间范围：`1h`（1 小时）、`30m`（30 分钟）、`2d`（2 天）
+
+**参数组合规则**：
+
+- `start_time` + `end_time`：指定具体时间范围
+- `start_time` + `time_range`：从 start_time 开始的范围
+- `end_time` + `time_range`：结束于 end_time 的范围
+- 三者都提供时：验证 `time_range == end_time - start_time`
 
 **请求示例**：
 
@@ -92,20 +101,23 @@ curl http://localhost:8080/v1/stats/overview
 # 默认参数（最近 1 小时）
 curl "http://localhost:8080/v1/stats/aggregate"
 
-# 指定时间范围
+# 指定时间范围（毫秒时间戳）
 curl "http://localhost:8080/v1/stats/aggregate?start_time=1743307200000&end_time=1743310800000"
 
 # ISO8601 格式
 curl "http://localhost:8080/v1/stats/aggregate?start_time=2026-03-30T10:00:00Z&end_time=2026-03-30T12:00:00Z"
 
-# 15 分钟粒度
-curl "http://localhost:8080/v1/stats/aggregate?granularity=15m"
+# 使用 time_range（最近 2 小时）
+curl "http://localhost:8080/v1/stats/aggregate?time_range=2h"
+
+# 15 分钟窗口大小
+curl "http://localhost:8080/v1/stats/aggregate?window_size=15m"
 
 # 过滤特定模型
 curl "http://localhost:8080/v1/stats/aggregate?model=qwen3.5-35b-a3b"
 
-# 组合查询
-curl "http://localhost:8080/v1/stats/aggregate?start_time=1743307200000&end_time=1743310800000&granularity=15m&model=qwen3.5-35b-a3b"
+# 组合查询：最近 1 小时，15 分钟窗口，过滤特定模型
+curl "http://localhost:8080/v1/stats/aggregate?time_range=1h&window_size=15m&model=qwen3.5-35b-a3b"
 ```
 
 **响应示例**：
@@ -119,7 +131,7 @@ curl "http://localhost:8080/v1/stats/aggregate?start_time=1743307200000&end_time
     "items": [
       {
         "window_start": "2026-03-30T10:00:00+00:00",
-        "window_size_seconds": 3600,
+        "window_size_seconds": 900,
         "model": "qwen3.5-35b-a3b",
         "backend": "sglang-qwen3.5-35b-a3b",
         "total_requests": 1523,
@@ -132,7 +144,32 @@ curl "http://localhost:8080/v1/stats/aggregate?start_time=1743307200000&end_time
         "p90_duration_ms": 380,
         "p99_duration_ms": 1200
       }
-    ]
+    ],
+    "summary": {
+      "window_start": "2026-03-30T12:00:00+00:00",
+      "window_size_seconds": 0,
+      "stop_reason": "finished"
+    }
+  }
+}
+```
+
+**限额触发时的响应**：
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "total": 256,
+    "items": [
+      // ... 最多 256 条数据
+    ],
+    "summary": {
+      "window_start": "2026-03-30T11:30:00+00:00",
+      "window_size_seconds": 1,
+      "stop_reason": "too_many_data"
+    }
   }
 }
 ```
@@ -198,7 +235,7 @@ interface TimeRange {
 // 聚合统计项
 interface AggregateItem {
   window_start: string;           // ISO8601 格式
-  window_size_seconds: number;     // 窗口大小（秒）
+  window_size_seconds: number;    // 窗口大小（秒）
   model: string;
   backend: string;
   total_requests: number;
@@ -207,15 +244,23 @@ interface AggregateItem {
   avg_duration_ms: number;
   min_duration_ms: number;
   max_duration_ms: number;
-  p50_duration_ms: number;
-  p90_duration_ms: number;
-  p99_duration_ms: number;
+  p50_duration_ms: number | null;
+  p90_duration_ms: number | null;
+  p99_duration_ms: number | null;
+}
+
+// 聚合摘要（指示完成状态）
+interface AggregateSummary {
+  window_start: string;           // ISO8601 格式
+  window_size_seconds: number;    // 剩余秒数（0 表示完成）
+  stop_reason: "finished" | "too_many_data";
 }
 
 // 聚合统计响应
 interface AggregateResponse {
   total: number;
   items: AggregateItem[];
+  summary: AggregateSummary;      // 新增摘要字段
 }
 
 // 概览统计汇总
@@ -248,14 +293,17 @@ interface OverviewData {
   top_backends: TopBackend[];
 }
 
-// 时间粒度
-type Granularity = "5m" | "15m" | "1h" | "1d";
+// 时间粒度（窗口大小）
+// 支持任意正整数 + 单位格式：Ns（秒）、Nm/Nmin（分）、Nh（时）、Nd（天）
+// 示例：5m、15m、1h、1d、30s、90min、2h
+type WindowSize = string;
 
 // 聚合查询参数
 interface AggregateParams {
-  start_time?: string | number;  // 毫秒时间戳或 ISO8601
-  end_time?: string | number;    // 毫秒时间戳或 ISO8601
-  granularity?: Granularity;
+  start_time?: string | number;   // 毫秒时间戳或 ISO8601
+  end_time?: string | number;     // 毫秒时间戳或 ISO8601
+  time_range?: string;            // 时间范围：支持任意正整数 + 单位
+  window_size?: WindowSize;       // 聚合窗口大小：支持任意正整数 + 单位
   model?: string;
   backend?: string;
 }
@@ -288,7 +336,8 @@ console.log(overview.data.summary);
 
 // 获取聚合数据
 const aggregate = await client.getAggregate({
-  granularity: "15m",
+  time_range: "1h",
+  window_size: "15m",
   model: "qwen3.5-35b-a3b"
 });
 ```
@@ -361,7 +410,7 @@ async function main() {
   const aggregate = await client.getAggregate({
     start_time: "2026-03-30T10:00:00Z",
     end_time: "2026-03-30T12:00:00Z",
-    granularity: "15m",
+    window_size: "15m",
     model: "qwen3.5-35b-a3b"
   });
   console.log(`Windows: ${aggregate.data.total}`);
@@ -392,21 +441,33 @@ curl -s $AUTH_HEADER "$BASE_URL/stats/overview" | jq '.data.summary'
 
 echo
 echo "2. 聚合统计（默认 1 小时）："
-curl -s $AUTH_HEADER "$BASE_URL/stats/aggregate" | jq '.data.total'
+curl -s $AUTH_HEADER "$BASE_URL/stats/aggregate" | jq '.data'
 
 echo
-echo "3. 聚合统计（15 分钟粒度）："
-curl -s $AUTH_HEADER "$BASE_URL/stats/aggregate?granularity=15m" | jq '.data.total'
+echo "3. 聚合统计（15 分钟窗口）："
+curl -s $AUTH_HEADER "$BASE_URL/stats/aggregate?window_size=15m" | jq '.data.total'
 
 echo
-echo "4. 指定时间范围："
+echo "4. 使用 time_range（最近 2 小时）："
+curl -s $AUTH_HEADER "$BASE_URL/stats/aggregate?time_range=2h" | jq '.data.total'
+
+echo
+echo "5. 指定时间范围："
 curl -s $AUTH_HEADER "$BASE_URL/stats/aggregate?start_time=1743307200000&end_time=1743310800000" | jq '.data.total'
 
 echo
-echo "5. 过滤特定模型："
+echo "6. 过滤特定模型："
 curl -s $AUTH_HEADER "$BASE_URL/stats/aggregate?model=qwen3.5-35b-a3b" | jq '.data.total'
 
 echo
-echo "6. 错误测试（无效时间范围）："
+echo "7. 组合查询（1 小时范围，15 分钟窗口）："
+curl -s $AUTH_HEADER "$BASE_URL/stats/aggregate?time_range=1h&window_size=15m&model=qwen3.5-35b-a3b" | jq '.data'
+
+echo
+echo "8. 查看响应中的 summary 字段："
+curl -s $AUTH_HEADER "$BASE_URL/stats/aggregate?window_size=5m" | jq '.data.summary'
+
+echo
+echo "9. 错误测试（无效时间范围）："
 curl -s $AUTH_HEADER "$BASE_URL/stats/aggregate?start_time=9999999999999&end_time=0" | jq
 ```

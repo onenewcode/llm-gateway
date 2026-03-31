@@ -1,7 +1,7 @@
 //! 命令解析与分发
 
 use crate::cli::formatter::OutputFormat;
-use crate::query::{AggQuery, EventFilter, TimeGranularity};
+use crate::query::{AggQuery, EventFilter};
 use chrono::Utc;
 use humantime::parse_duration;
 
@@ -14,8 +14,6 @@ pub enum Command {
     },
     Stats {
         query: AggQuery,
-        model: Option<String>,
-        backend: Option<String>,
     },
     Models {
         sort: String,
@@ -122,9 +120,7 @@ impl Command {
 
     fn parse_stats(args: &[&str]) -> Self {
         let mut last = "1h".to_string();
-        let mut model: Option<String> = None;
-        let mut backend: Option<String> = None;
-        let mut granularity = TimeGranularity::OneHour;
+        let mut window_size_secs = 3600u64;
 
         let mut i = 0;
         while i < args.len() {
@@ -133,16 +129,8 @@ impl Command {
                     last = args[i + 1].to_string();
                     i += 2;
                 }
-                "--model" if i + 1 < args.len() => {
-                    model = Some(args[i + 1].to_string());
-                    i += 2;
-                }
-                "--backend" if i + 1 < args.len() => {
-                    backend = Some(args[i + 1].to_string());
-                    i += 2;
-                }
                 "--granularity" if i + 1 < args.len() => {
-                    granularity = parse_granularity(args[i + 1]);
+                    window_size_secs = crate::query::parse_time(args[i + 1]).unwrap_or(3600);
                     i += 2;
                 }
                 _ => i += 1,
@@ -153,22 +141,18 @@ impl Command {
         let duration = parse_duration(&last).unwrap_or(std::time::Duration::from_secs(3600));
         let start = now - duration.as_millis() as i64;
 
-        let window_size = std::num::NonZeroU64::new(granularity.as_seconds() as u64)
+        let window_size = std::num::NonZeroU64::new(window_size_secs)
             .unwrap_or_else(|| std::num::NonZeroU64::new(3600).unwrap());
 
         let query = AggQuery {
-            start_time: start,
-            end_time: now,
+            start_time: start as u64,
+            end_time: now as u64,
             window_size,
-            model: model.clone(),
-            backend: backend.clone(),
+            model: None,
+            backend: None,
         };
 
-        Command::Stats {
-            query,
-            model,
-            backend,
-        }
+        Command::Stats { query }
     }
 
     fn parse_models(args: &[&str]) -> Self {
@@ -250,16 +234,6 @@ fn parse_timestamp(s: &str) -> Option<i64> {
     }
 
     None
-}
-
-fn parse_granularity(s: &str) -> TimeGranularity {
-    match s.to_lowercase().as_str() {
-        "5m" => TimeGranularity::FiveMinutes,
-        "15m" => TimeGranularity::FifteenMinutes,
-        "1h" => TimeGranularity::OneHour,
-        "1d" => TimeGranularity::OneDay,
-        _ => TimeGranularity::OneHour,
-    }
 }
 
 #[cfg(test)]
@@ -456,26 +430,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_stats_with_model() {
-        let cmd = Command::parse("stats --model qwen-35b");
-        if let Command::Stats { model, .. } = cmd {
-            assert_eq!(model, Some("qwen-35b".to_string()));
-        } else {
-            panic!("Expected Stats command");
-        }
-    }
-
-    #[test]
-    fn test_parse_stats_with_backend() {
-        let cmd = Command::parse("stats --backend sglang");
-        if let Command::Stats { backend, .. } = cmd {
-            assert_eq!(backend, Some("sglang".to_string()));
-        } else {
-            panic!("Expected Stats command");
-        }
-    }
-
-    #[test]
     fn test_parse_stats_with_granularity() {
         let cmd = Command::parse("stats --granularity 15m");
         assert!(matches!(cmd, Command::Stats { .. }));
@@ -511,24 +465,6 @@ mod tests {
     fn test_parse_timestamp_invalid() {
         let result = parse_timestamp("invalid");
         assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_parse_granularity_values() {
-        assert!(matches!(
-            parse_granularity("5m"),
-            TimeGranularity::FiveMinutes
-        ));
-        assert!(matches!(
-            parse_granularity("15m"),
-            TimeGranularity::FifteenMinutes
-        ));
-        assert!(matches!(parse_granularity("1h"), TimeGranularity::OneHour));
-        assert!(matches!(parse_granularity("1d"), TimeGranularity::OneDay));
-        assert!(matches!(
-            parse_granularity("invalid"),
-            TimeGranularity::OneHour
-        ));
     }
 
     #[test]

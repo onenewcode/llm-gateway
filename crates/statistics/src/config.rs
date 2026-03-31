@@ -17,6 +17,9 @@ pub struct StatisticsConfig {
     /// 写入缓冲区大小（事件数量）
     #[serde(default = "default_write_buffer_size")]
     pub write_buffer_size: usize,
+    /// 聚合查询最大返回行数
+    #[serde(default = "default_aggregate_limit")]
+    pub aggregate_limit: usize,
 }
 
 impl Default for StatisticsConfig {
@@ -26,6 +29,7 @@ impl Default for StatisticsConfig {
             db_path: default_db_path(),
             retention_days: default_retention_days(),
             write_buffer_size: default_write_buffer_size(),
+            aggregate_limit: default_aggregate_limit(),
         }
     }
 }
@@ -50,6 +54,11 @@ fn default_write_buffer_size() -> usize {
     1000
 }
 
+/// 默认聚合查询最大返回行数
+fn default_aggregate_limit() -> usize {
+    256
+}
+
 impl StatisticsConfig {
     /// 创建内存配置（用于测试）
     pub fn in_memory() -> Self {
@@ -58,6 +67,7 @@ impl StatisticsConfig {
             db_path: ":memory:".to_string(),
             retention_days: 7,
             write_buffer_size: 100,
+            aggregate_limit: 256,
         }
     }
 
@@ -65,6 +75,10 @@ impl StatisticsConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.retention_days == 0 {
             return Err("retention_days must be greater than 0".to_string());
+        }
+
+        if self.aggregate_limit == 0 {
+            return Err("aggregate_limit must be positive".to_string());
         }
 
         Ok(())
@@ -101,6 +115,19 @@ mod tests {
     fn test_validate_zero_retention() {
         let mut config = StatisticsConfig::default();
         config.retention_days = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_aggregate_limit_default() {
+        let config = StatisticsConfig::default();
+        assert_eq!(config.aggregate_limit, 256);
+    }
+
+    #[test]
+    fn test_config_aggregate_limit_validation() {
+        let mut config = StatisticsConfig::default();
+        config.aggregate_limit = 0;
         assert!(config.validate().is_err());
     }
 }

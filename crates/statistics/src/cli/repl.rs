@@ -33,6 +33,7 @@ impl ReplApp {
             db_path: db_path.to_string(),
             retention_days: 30,
             write_buffer_size: 1000,
+            aggregate_limit: 256,
         };
         let store = StatsStoreManager::new(&config).await?;
         let editor = DefaultEditor::new()?;
@@ -93,11 +94,7 @@ impl ReplApp {
     async fn handle_command(&mut self, command: Command) {
         match command {
             Command::Query { filter, format } => self.handle_query(filter, format).await,
-            Command::Stats {
-                query,
-                model,
-                backend,
-            } => self.handle_stats(query, model, backend).await,
+            Command::Stats { query, .. } => self.handle_stats(query).await,
             Command::Models { sort, format } => self.handle_models(sort, format).await,
             Command::Backends { sort, format } => self.handle_backends(sort, format).await,
             Command::Recent { limit } => self.handle_recent(limit).await,
@@ -106,10 +103,7 @@ impl ReplApp {
             Command::Exit => {}
             Command::Unknown(cmd) => {
                 if !cmd.is_empty() {
-                    println!(
-                        "Unknown command: {cmd}. Type 'help' for available commands.",
-                        cmd = cmd
-                    );
+                    println!("Unknown command: {cmd}. Type 'help' for available commands.")
                 }
             }
         }
@@ -135,16 +129,11 @@ impl ReplApp {
     /// 处理聚合统计命令
     ///
     /// 注意：model 和 backend 参数已在 query 中包含，预留用于未来扩展
-    async fn handle_stats(
-        &mut self,
-        query: crate::query::AggQuery,
-        _model: Option<String>,
-        _backend: Option<String>,
-    ) {
+    async fn handle_stats(&mut self, query: crate::query::AggQuery) {
         match self.store.get_aggregated_stats(query).await {
-            Ok(stats) => {
+            Ok(result) => {
                 println!("Aggregated statistics:");
-                for stat in stats {
+                for stat in result.stats {
                     println!(
                         "  {model} / {backend}: {count} requests, {avg}ms avg",
                         model = stat.model,
@@ -153,6 +142,17 @@ impl ReplApp {
                         avg = stat.avg_duration_ms
                     );
                 }
+                println!(
+                    "  Summary: {} at {}, remaining {}s ({})",
+                    result.summary.stop_reason,
+                    result.summary.window_start,
+                    result.summary.window_size_seconds,
+                    if result.summary.window_size_seconds == 0 {
+                        "finished"
+                    } else {
+                        "too many data"
+                    }
+                );
             }
             Err(e) => {
                 eprintln!("Error getting stats: {e}", e = e);
@@ -268,7 +268,7 @@ impl ReplApp {
                 println!("────────────────────────────────────────");
 
                 let timestamp = Local
-                    .timestamp_millis_opt(event.timestamp)
+                    .timestamp_millis_opt(event.timestamp as i64)
                     .single()
                     .unwrap_or_default();
 

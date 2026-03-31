@@ -1,7 +1,7 @@
 //! 聚合计算器模块
 
 use crate::event::RoutingEvent;
-use crate::query::AggStats;
+use crate::query::{AggStats, AggSummary, AggregateResult};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 
@@ -9,62 +9,101 @@ use std::num::NonZeroU64;
 pub struct Aggregator;
 
 impl Aggregator {
-    /// 按指定窗口大小聚合事件
-    pub fn aggregate(events: &[RoutingEvent], window_size: NonZeroU64) -> Vec<AggStats> {
+    /// 按指定窗口大小聚合事件，支持限额控制
+    pub fn aggregate(
+        events: &[RoutingEvent],
+        window_size: NonZeroU64,
+        limit: usize,
+        start_time: u64,
+        end_time: u64,
+    ) -> AggregateResult {
         if events.is_empty() {
-            return Vec::new();
+            return AggregateResult {
+                stats: Vec::new(),
+                summary: AggSummary::finished(end_time),
+            };
         }
 
-        let window_size = window_size.get() as i64;
+        let window_size = window_size.get();
 
-        // 按 (窗口起始，model, backend) 分组
-        let mut groups: HashMap<(i64, String, String), Vec<&RoutingEvent>> = HashMap::new();
+        // 按 (window_start, model, backend) 分组
+        let mut groups: HashMap<(u64, String, String), Vec<&RoutingEvent>> = HashMap::new();
 
         for event in events {
-            // 计算窗口起始时间（毫秒）
             let window_start = (event.timestamp / 1000 / window_size) * window_size * 1000;
             let key = (window_start, event.model.clone(), event.backend.clone());
             groups.entry(key).or_default().push(event);
         }
 
-        // 计算各组统计值
-        groups
-            .into_iter()
-            .map(|((window_start, model, backend), events)| {
-                let total_requests = events.len() as i64;
-                let success_count = events.iter().filter(|e| e.success).count() as i64;
-                let fail_count = events.iter().filter(|e| !e.success).count() as i64;
+        // 按窗口起始时间排序
+        let mut sorted_keys: Vec<_> = groups.keys().cloned().collect();
+        sorted_keys.sort_by_key(|(ws, _, _)| *ws);
 
-                // 计算延迟统计
-                let mut durations: Vec<i64> = events.iter().map(|e| e.duration_ms).collect();
-                durations.sort();
+        // 检查限额并构建结果
+        let mut stats = Vec::new();
+        let mut reached_limit = false;
+        let mut last_window_start = start_time;
 
-                let avg_duration_ms = if total_requests > 0 {
-                    durations.iter().sum::<i64>() / total_requests
-                } else {
-                    0
-                };
+        for key in sorted_keys {
+            if stats.len() >= limit {
+                reached_limit = true;
+                last_window_start = key.0;
+                break;
+            }
 
-                let min_duration_ms = durations.first().copied().unwrap_or(0);
-                let max_duration_ms = durations.last().copied().unwrap_or(0);
+            let events = groups.remove(&key).unwrap();
+            let agg_stat = compute_agg_stat(&key, events, window_size);
+            stats.push(agg_stat);
+            last_window_start = key.0;
+        }
 
-                AggStats {
-                    window_start,
-                    window_size: window_size * 1000, // 转换为毫秒
-                    model,
-                    backend,
-                    total_requests,
-                    success_count,
-                    fail_count,
-                    avg_duration_ms,
-                    min_duration_ms,
-                    max_duration_ms,
-                    p50_duration_ms: Some(calculate_percentile(&durations, 0.50)),
-                    p90_duration_ms: Some(calculate_percentile(&durations, 0.90)),
-                    p99_duration_ms: Some(calculate_percentile(&durations, 0.99)),
-                }
-            })
-            .collect()
+        let summary = if reached_limit {
+            AggSummary::too_many_data(last_window_start, end_time)
+        } else {
+            AggSummary::finished(end_time)
+        };
+
+        AggregateResult { stats, summary }
+    }
+}
+
+/// 辅助函数：计算单个聚合统计
+fn compute_agg_stat(
+    key: &(u64, String, String),
+    events: Vec<&RoutingEvent>,
+    window_size: u64,
+) -> AggStats {
+    let (window_start, model, backend) = key;
+    let total_requests = events.len() as i64;
+    let success_count = events.iter().filter(|e| e.success).count() as i64;
+    let fail_count = events.iter().filter(|e| !e.success).count() as i64;
+
+    let mut durations: Vec<i64> = events.iter().map(|e| e.duration_ms).collect();
+    durations.sort();
+
+    let avg_duration_ms = if total_requests > 0 {
+        durations.iter().sum::<i64>() / total_requests
+    } else {
+        0
+    };
+
+    let min_duration_ms = durations.first().copied().unwrap_or(0);
+    let max_duration_ms = durations.last().copied().unwrap_or(0);
+
+    AggStats {
+        window_start: *window_start,
+        window_size: window_size * 1000,
+        model: model.clone(),
+        backend: backend.clone(),
+        total_requests,
+        success_count,
+        fail_count,
+        avg_duration_ms,
+        min_duration_ms,
+        max_duration_ms,
+        p50_duration_ms: Some(calculate_percentile(&durations, 0.50)),
+        p90_duration_ms: Some(calculate_percentile(&durations, 0.90)),
+        p99_duration_ms: Some(calculate_percentile(&durations, 0.99)),
     }
 }
 
@@ -83,7 +122,7 @@ mod tests {
     use super::*;
 
     fn create_event(
-        timestamp: i64,
+        timestamp: u64,
         model: &str,
         backend: &str,
         success: bool,
@@ -104,8 +143,10 @@ mod tests {
     #[test]
     fn test_aggregate_empty_events() {
         let events: Vec<RoutingEvent> = Vec::new();
-        let result = Aggregator::aggregate(&events, NonZeroU64::new(3600).unwrap());
-        assert!(result.is_empty());
+        let result =
+            Aggregator::aggregate(&events, NonZeroU64::new(3600).unwrap(), usize::MAX, 0, 0);
+        assert!(result.stats.is_empty());
+        assert_eq!(result.summary.stop_reason, "finished");
     }
 
     #[test]
@@ -113,15 +154,21 @@ mod tests {
         let timestamp = 1234567890000;
         let events = vec![create_event(timestamp, "model-a", "backend-1", true, 100)];
 
-        let result = Aggregator::aggregate(&events, NonZeroU64::new(3600).unwrap());
+        let result = Aggregator::aggregate(
+            &events,
+            NonZeroU64::new(3600).unwrap(),
+            usize::MAX,
+            0,
+            10000000000,
+        );
 
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].total_requests, 1);
-        assert_eq!(result[0].success_count, 1);
-        assert_eq!(result[0].fail_count, 0);
-        assert_eq!(result[0].avg_duration_ms, 100);
-        assert_eq!(result[0].min_duration_ms, 100);
-        assert_eq!(result[0].max_duration_ms, 100);
+        assert_eq!(result.stats.len(), 1);
+        assert_eq!(result.stats[0].total_requests, 1);
+        assert_eq!(result.stats[0].success_count, 1);
+        assert_eq!(result.stats[0].fail_count, 0);
+        assert_eq!(result.stats[0].avg_duration_ms, 100);
+        assert_eq!(result.stats[0].min_duration_ms, 100);
+        assert_eq!(result.stats[0].max_duration_ms, 100);
     }
 
     #[test]
@@ -134,15 +181,21 @@ mod tests {
             create_event(base_timestamp + 2000, "model-a", "backend-1", false, 300),
         ];
 
-        let result = Aggregator::aggregate(&events, NonZeroU64::new(3600).unwrap());
+        let result = Aggregator::aggregate(
+            &events,
+            NonZeroU64::new(3600).unwrap(),
+            usize::MAX,
+            0,
+            10000000000,
+        );
 
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].total_requests, 3);
-        assert_eq!(result[0].success_count, 2);
-        assert_eq!(result[0].fail_count, 1);
-        assert_eq!(result[0].avg_duration_ms, 200); // (100+200+300)/3
-        assert_eq!(result[0].min_duration_ms, 100);
-        assert_eq!(result[0].max_duration_ms, 300);
+        assert_eq!(result.stats.len(), 1);
+        assert_eq!(result.stats[0].total_requests, 3);
+        assert_eq!(result.stats[0].success_count, 2);
+        assert_eq!(result.stats[0].fail_count, 1);
+        assert_eq!(result.stats[0].avg_duration_ms, 200); // (100+200+300)/3
+        assert_eq!(result.stats[0].min_duration_ms, 100);
+        assert_eq!(result.stats[0].max_duration_ms, 300);
     }
 
     #[test]
@@ -154,15 +207,23 @@ mod tests {
             create_event(7200000, "model-a", "backend-1", true, 200), // 窗口 2
         ];
 
-        let result = Aggregator::aggregate(&events, NonZeroU64::new(3600).unwrap());
+        let result = Aggregator::aggregate(
+            &events,
+            NonZeroU64::new(3600).unwrap(),
+            usize::MAX,
+            0,
+            10000000000,
+        );
 
-        assert_eq!(result.len(), 2);
+        assert_eq!(result.stats.len(), 2);
 
         let window1: Vec<_> = result
+            .stats
             .iter()
             .filter(|s| s.window_start == 3600000)
             .collect();
         let window2: Vec<_> = result
+            .stats
             .iter()
             .filter(|s| s.window_start == 7200000)
             .collect();
@@ -184,12 +245,26 @@ mod tests {
             create_event(base_timestamp + 1000, "model-b", "backend-1", true, 200),
         ];
 
-        let result = Aggregator::aggregate(&events, NonZeroU64::new(3600).unwrap());
+        let result = Aggregator::aggregate(
+            &events,
+            NonZeroU64::new(3600).unwrap(),
+            usize::MAX,
+            0,
+            10000000000,
+        );
 
-        assert_eq!(result.len(), 2);
+        assert_eq!(result.stats.len(), 2);
 
-        let model_a: Vec<_> = result.iter().filter(|s| s.model == "model-a").collect();
-        let model_b: Vec<_> = result.iter().filter(|s| s.model == "model-b").collect();
+        let model_a: Vec<_> = result
+            .stats
+            .iter()
+            .filter(|s| s.model == "model-a")
+            .collect();
+        let model_b: Vec<_> = result
+            .stats
+            .iter()
+            .filter(|s| s.model == "model-b")
+            .collect();
 
         assert_eq!(model_a.len(), 1);
         assert_eq!(model_a[0].avg_duration_ms, 100);
@@ -221,12 +296,60 @@ mod tests {
         ];
 
         // 使用 5 分钟窗口
-        let result_5min = Aggregator::aggregate(&events, NonZeroU64::new(300).unwrap());
-        assert_eq!(result_5min.len(), 3); // 3 个不同窗口
+        let result_5min = Aggregator::aggregate(
+            &events,
+            NonZeroU64::new(300).unwrap(),
+            usize::MAX,
+            0,
+            1000000,
+        );
+        assert_eq!(result_5min.stats.len(), 3); // 3 个不同窗口
 
         // 使用 15 分钟窗口
-        let result_15min = Aggregator::aggregate(&events, NonZeroU64::new(900).unwrap());
-        assert_eq!(result_15min.len(), 1); // 同一窗口
-        assert_eq!(result_15min[0].total_requests, 3);
+        let result_15min = Aggregator::aggregate(
+            &events,
+            NonZeroU64::new(900).unwrap(),
+            usize::MAX,
+            0,
+            1000000,
+        );
+        assert_eq!(result_15min.stats.len(), 1); // 同一窗口
+        assert_eq!(result_15min.stats[0].total_requests, 3);
+    }
+
+    #[test]
+    fn test_aggregate_with_limit_finished() {
+        let events = vec![
+            create_event(0, "model-a", "backend-1", true, 100),
+            create_event(3600000, "model-a", "backend-1", true, 200),
+        ];
+
+        let result = Aggregator::aggregate(&events, NonZeroU64::new(3600).unwrap(), 10, 0, 7200000);
+
+        assert_eq!(result.stats.len(), 2);
+        assert_eq!(result.summary.stop_reason, "finished");
+        assert_eq!(result.summary.window_size_seconds, 0);
+    }
+
+    #[test]
+    fn test_aggregate_with_limit_exceeded() {
+        // Create 5 events in different windows
+        let events: Vec<_> = (0..5)
+            .map(|i| {
+                create_event(
+                    i * 3600000,
+                    "model-a",
+                    "backend-1",
+                    true,
+                    100 + i as i64 * 10,
+                )
+            })
+            .collect();
+
+        let result = Aggregator::aggregate(&events, NonZeroU64::new(3600).unwrap(), 3, 0, 18000000);
+
+        assert_eq!(result.stats.len(), 3);
+        assert_eq!(result.summary.stop_reason, "too_many_data");
+        assert!(result.summary.window_size_seconds > 0);
     }
 }

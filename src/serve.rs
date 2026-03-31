@@ -167,17 +167,19 @@ async fn handle_request(
                         // 记录成功事件
                         if let Some(stats) = &stats {
                             let duration_ms = start_time.elapsed().as_millis();
-                            let event =
-                                crate::RoutingEvent::builder(timestamp_ms(), input_node.port)
-                                    .remote_addr(remote_addr)
-                                    .method(method.as_str())
-                                    .path(payload.parts.uri.path())
-                                    .model(route.model_name())
-                                    .routing_path(routing_path)
-                                    .backend(route.backend_name())
-                                    .success(true)
-                                    .duration_ms(duration_ms as _)
-                                    .build();
+                            let event = crate::RoutingEvent::builder(
+                                timestamp_ms() as u64,
+                                input_node.port,
+                            )
+                            .remote_addr(remote_addr)
+                            .method(method.as_str())
+                            .path(payload.parts.uri.path())
+                            .model(route.model_name())
+                            .routing_path(routing_path)
+                            .backend(route.backend_name())
+                            .success(true)
+                            .duration_ms(duration_ms as _)
+                            .build();
                             let stats = stats.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = stats.record_event(event).await {
@@ -191,18 +193,20 @@ async fn handle_request(
                         // 记录后端失败事件
                         if let Some(stats) = &stats {
                             let duration_ms = start_time.elapsed().as_millis();
-                            let event =
-                                crate::RoutingEvent::builder(timestamp_ms(), input_node.port)
-                                    .remote_addr(remote_addr)
-                                    .method(method.as_str())
-                                    .path(payload.parts.uri.path())
-                                    .model(route.model_name())
-                                    .routing_path(routing_path)
-                                    .backend(route.backend_name())
-                                    .success(false)
-                                    .duration_ms(duration_ms as _)
-                                    .error_type(e.to_string())
-                                    .build();
+                            let event = crate::RoutingEvent::builder(
+                                timestamp_ms() as u64,
+                                input_node.port,
+                            )
+                            .remote_addr(remote_addr)
+                            .method(method.as_str())
+                            .path(payload.parts.uri.path())
+                            .model(route.model_name())
+                            .routing_path(routing_path)
+                            .backend(route.backend_name())
+                            .success(false)
+                            .duration_ms(duration_ms as _)
+                            .error_type(e.to_string())
+                            .build();
                             let stats = stats.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = stats.record_event(event).await {
@@ -219,17 +223,18 @@ async fn handle_request(
                 // 记录路由失败事件
                 if let Some(stats) = stats {
                     let duration_ms = start_time.elapsed().as_millis();
-                    let event = crate::RoutingEvent::builder(timestamp_ms(), input_node.port)
-                        .remote_addr(remote_addr)
-                        .method(payload.parts.method.as_str())
-                        .path(payload.parts.uri.path())
-                        .model(payload.get_model())
-                        .success(false)
-                        .duration_ms(duration_ms as _)
-                        .error_type(match &e {
-                            RouteError::NoAvailable => "NoAvailable",
-                        })
-                        .build();
+                    let event =
+                        crate::RoutingEvent::builder(timestamp_ms() as u64, input_node.port)
+                            .remote_addr(remote_addr)
+                            .method(payload.parts.method.as_str())
+                            .path(payload.parts.uri.path())
+                            .model(payload.get_model())
+                            .success(false)
+                            .duration_ms(duration_ms as _)
+                            .error_type(match &e {
+                                RouteError::NoAvailable => "NoAvailable",
+                            })
+                            .build();
                     let stats = stats.clone();
                     tokio::spawn(async move {
                         if let Err(e) = stats.record_event(event).await {
