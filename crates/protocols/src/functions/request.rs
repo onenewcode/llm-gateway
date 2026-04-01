@@ -33,7 +33,7 @@ pub fn openai_to_anthropic(body: Json) -> ProtocolResult<Json> {
                     system_prompts.push(content.to_string())
                 }
             }
-            "user" | "assistant" | "tool" => {
+            "user" | "assistant" => {
                 // Validate that message has content or tool_calls
                 let has_content = msg.get("content").is_some();
                 let has_tool_calls = msg.get("tool_calls").is_some();
@@ -44,8 +44,86 @@ pub fn openai_to_anthropic(body: Json) -> ProtocolResult<Json> {
                     ));
                 }
 
-                // Clone only valid messages
-                filtered_messages.push(msg.clone())
+                // Convert assistant message with tool_calls to Anthropic format
+                if role == "assistant" && has_tool_calls {
+                    let mut content_array: Vec<Json> = Vec::new();
+
+                    // Add text content if present
+                    if let Some(content) = msg.get("content").and_then(|c| c.as_str())
+                        && !content.is_empty()
+                    {
+                        content_array.push(json!({
+                            "type": "text",
+                            "text": content
+                        }));
+                    }
+
+                    // Convert tool_calls to tool_use
+                    if let Some(tool_calls) = msg.get("tool_calls").and_then(|t| t.as_array()) {
+                        for tool_call in tool_calls {
+                            if let Some(func) =
+                                tool_call.get("function").and_then(|f| f.as_object())
+                            {
+                                let tool_id =
+                                    tool_call.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                                let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                                let arguments = func
+                                    .get("arguments")
+                                    .and_then(|a| a.as_str())
+                                    .unwrap_or("{}");
+
+                                // Parse arguments as JSON object
+                                let input: Json =
+                                    serde_json::from_str(arguments).unwrap_or(json!({}));
+
+                                content_array.push(json!({
+                                    "type": "tool_use",
+                                    "id": tool_id,
+                                    "name": name,
+                                    "input": input
+                                }));
+                            }
+                        }
+                    }
+
+                    // Create converted message
+                    let mut converted_msg = json!({
+                        "role": "assistant",
+                        "content": content_array
+                    });
+                    // Copy stop_reason if present
+                    if let Some(stop_reason) = msg.get("stop_reason") {
+                        converted_msg["stop_reason"] = stop_reason.clone();
+                    }
+                    filtered_messages.push(converted_msg);
+                } else {
+                    // Clone other messages as-is
+                    filtered_messages.push(msg.clone())
+                }
+            }
+            "tool" => {
+                // Convert OpenAI tool response to Anthropic user message with tool_result
+                let tool_call_id = msg
+                    .get("tool_call_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        ProtocolError::InvalidRequest(
+                            "Tool message missing tool_call_id".to_string(),
+                        )
+                    })?;
+
+                let content = msg.get("content").cloned().unwrap_or(json!(null));
+
+                // Create Anthropic-style user message with tool_result
+                let tool_result_msg = json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": tool_call_id,
+                        "content": content
+                    }]
+                });
+                filtered_messages.push(tool_result_msg);
             }
             _ => {
                 return Err(ProtocolError::InvalidRequest(format!(
@@ -59,6 +137,7 @@ pub fn openai_to_anthropic(body: Json) -> ProtocolResult<Json> {
     // Build max_tokens value
     let max_tokens_val = obj
         .get("max_tokens")
+        .or_else(|| obj.get("max_completion_tokens"))
         .cloned()
         .unwrap_or_else(|| json!(2048));
 
