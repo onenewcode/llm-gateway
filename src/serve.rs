@@ -40,7 +40,7 @@ pub async fn serve(
     input_node: &Arc<InputNode>,
     stats: Option<Arc<StatsStoreManager>>,
 ) -> Result<(), GatewayError> {
-    let addr = SocketAddr::from(([0, 0, 0, 0], input_node.port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], input_node.port()));
     let listener = TcpListener::bind(addr).await?;
     let client = client();
 
@@ -63,7 +63,7 @@ pub async fn serve(
             });
 
             if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
-                warn!("Error handling connection from {remote_addr}: {e}");
+                warn!("Error handling connection from {remote_addr}: {e}")
             }
         });
     }
@@ -141,12 +141,8 @@ async fn handle_request(
     let mut payload = RoutePayload::new(req).await?;
 
     // 如有别名映射，在路由前直接替换请求体中的 model 字段
-    if let Some(model) = payload
-        .body
-        .get("model")
-        .and_then(|v| v.as_str())
-        .and_then(|m| input_node.alias.get(m))
-    {
+    if let Some(model) = input_node.get_alias(&payload.model) {
+        payload.model.clone_from(&model);
         payload.body["model"] = json!(model);
     }
 
@@ -155,7 +151,7 @@ async fn handle_request(
         match input_node.route(&payload) {
             Ok(route) => {
                 // 记录路由路径
-                let mut routing_path = format!("[{}]", input_node.port);
+                let mut routing_path = format!("[{}]", input_node.port());
                 for node in route.nodes.iter().rev() {
                     routing_path.push_str("->");
                     routing_path.push_str(node.node().name());
@@ -169,7 +165,7 @@ async fn handle_request(
                             let duration_ms = start_time.elapsed().as_millis();
                             let event = crate::RoutingEvent::builder(
                                 timestamp_ms() as u64,
-                                input_node.port,
+                                input_node.port(),
                             )
                             .remote_addr(remote_addr)
                             .method(method.as_str())
@@ -195,7 +191,7 @@ async fn handle_request(
                             let duration_ms = start_time.elapsed().as_millis();
                             let event = crate::RoutingEvent::builder(
                                 timestamp_ms() as u64,
-                                input_node.port,
+                                input_node.port(),
                             )
                             .remote_addr(remote_addr)
                             .method(method.as_str())
@@ -224,15 +220,16 @@ async fn handle_request(
                 if let Some(stats) = stats {
                     let duration_ms = start_time.elapsed().as_millis();
                     let event =
-                        crate::RoutingEvent::builder(timestamp_ms() as u64, input_node.port)
+                        crate::RoutingEvent::builder(timestamp_ms() as u64, input_node.port())
                             .remote_addr(remote_addr)
                             .method(payload.parts.method.as_str())
                             .path(payload.parts.uri.path())
-                            .model(payload.get_model())
+                            .model(payload.model())
                             .success(false)
                             .duration_ms(duration_ms as _)
                             .error_type(match &e {
                                 RouteError::NoAvailable => "NoAvailable",
+                                RouteError::OverConcurrency => "OverConcurrency",
                             })
                             .build();
                     let stats = stats.clone();
@@ -283,6 +280,17 @@ async fn handle_route_failure(e: RouteError) -> Result<Response<BoxBody>, Gatewa
                 )
                 .unwrap())
         }
+        RouteError::OverConcurrency => {
+            warn!("Concurrency limit exceeded for this model");
+            Ok(Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(
+                    Full::<Bytes>::from("Concurrency limit exceeded for this model")
+                        .map_err(|_| GatewayError::NoAvailableBackend)
+                        .boxed(),
+                )
+                .unwrap())
+        }
     }
 }
 
@@ -298,10 +306,8 @@ fn timestamp_ms() -> i64 {
 /// 处理 /v1/models 请求，返回可用模型列表
 async fn handle_models_request(input_node: &InputNode) -> Result<Response<BoxBody>, GatewayError> {
     let models: Vec<Value> = input_node
-        .models
-        .read()
-        .unwrap()
-        .keys()
+        .models()
+        .into_iter()
         .map(|name| {
             json!({
                 "id": name.as_str(),

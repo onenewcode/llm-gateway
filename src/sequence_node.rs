@@ -4,7 +4,6 @@
 
 use crate::{Node, RouteError, RoutePayload, RouteResult, SimpleGuard};
 use std::{
-    any::Any,
     collections::HashMap,
     sync::{Arc, RwLock},
 };
@@ -12,36 +11,33 @@ use std::{
 /// 序列节点结构
 ///
 /// 按顺序尝试多个后端节点，直到找到一个可用的
-pub(crate) struct SequenceNode {
+#[derive(Clone)]
+pub(crate) struct SequenceNode(Arc<Internal>);
+
+struct Internal {
     /// 节点名称
-    pub(super) name: String,
+    name: String,
     /// 后继节点列表
-    pub(super) successors: RwLock<Vec<Arc<dyn Node>>>,
+    successors: RwLock<Vec<Arc<dyn Node>>>,
 }
 
 impl Node for SequenceNode {
     /// 获取节点名称
     fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// 将节点转换为 Any
-    fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
-        self
+        &self.0.name
     }
 
     /// 顺序尝试每个后继节点，返回第一个成功的路由结果
     fn route(&self, payload: &RoutePayload) -> RouteResult {
-        for successor in &*self.successors.read().unwrap() {
+        for successor in &*self.0.successors.read().unwrap() {
             match successor.route(payload) {
                 Ok(mut route) => {
-                    route
-                        .nodes
-                        .push(Box::new(SimpleGuard::new(successor.clone())));
+                    route.nodes.push(Box::new(SimpleGuard(self.clone())));
                     return Ok(route);
                 }
                 Err(e) => match e {
                     RouteError::NoAvailable => {}
+                    RouteError::OverConcurrency => {}
                 },
             }
         }
@@ -50,8 +46,20 @@ impl Node for SequenceNode {
 
     /// 替换后继节点的引用，建立完整的节点连接
     fn replace_connections(&self, nodes: &HashMap<&str, Arc<dyn Node>>) {
-        for node in &mut *self.successors.write().unwrap() {
-            *node = nodes.get(node.name()).unwrap().clone()
+        let mut successors = self.0.successors.write().unwrap();
+        for node in successors.iter_mut() {
+            let name = node.name();
+            *node = nodes.get(name).unwrap().clone();
         }
+    }
+}
+
+impl SequenceNode {
+    /// 创建新的序列节点
+    pub(crate) fn new(name: String, successors: Vec<Arc<dyn Node>>) -> Self {
+        Self(Arc::new(Internal {
+            name,
+            successors: RwLock::new(successors),
+        }))
     }
 }

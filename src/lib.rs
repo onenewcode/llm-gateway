@@ -30,18 +30,21 @@ use health_monitor::HealthMonitor;
 use http::{Request, request};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
-use llm_gateway_config::{GatewayConfig, VirtualNode};
+use llm_gateway_config::{GatewayConfig, HealthConfig, VirtualNode};
 use llm_gateway_protocols::Protocol;
 use sequence_node::SequenceNode;
 use serde_json::Value as Json;
-use std::any::Any;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// 路由负载 - 在路由图中流动的请求上下文
 #[derive(Clone)]
 pub struct RoutePayload {
+    /// 请求输入时使用的协议
     pub protocol: Protocol,
+    /// 别名解析后，请求中实际使用的模型名称
+    pub model: String,
+    /// Http 信息
     pub parts: request::Parts,
     /// 请求体（已解析为 JSON）
     pub body: Json,
@@ -52,10 +55,21 @@ impl RoutePayload {
     pub async fn new(req: Request<Incoming>) -> Result<Self, GatewayError> {
         let (parts, incoming) = req.into_parts();
         let body = incoming.collect().await?;
+        let body: Json = serde_json::from_slice(&body.to_bytes())?;
+
+        let protocol =
+            Protocol::from_path(parts.uri.path()).ok_or(GatewayError::UnknownProtocol)?;
+        let model = body
+            .get("model")
+            .and_then(Json::as_str)
+            .ok_or(GatewayError::MissingModelField)?
+            .to_string();
+
         Ok(Self {
-            protocol: Protocol::from_path(parts.uri.path()).ok_or(GatewayError::UnknownProtocol)?,
+            protocol,
+            model,
             parts,
-            body: serde_json::from_slice(&body.to_bytes())?,
+            body,
         })
     }
 
@@ -64,12 +78,9 @@ impl RoutePayload {
         self.protocol
     }
 
-    /// 根据请求路径判断使用的协议
-    fn get_model(&self) -> &str {
-        self.body
-            .get("model")
-            .and_then(Json::as_str)
-            .unwrap_or("missing field")
+    /// 获取模型名称
+    const fn model(&self) -> &str {
+        self.model.as_str()
     }
 }
 
@@ -111,13 +122,16 @@ pub struct Backend {
 }
 
 /// 路由错误类型
+#[derive(Debug)]
 pub enum RouteError {
     /// 没有可用的后端
     NoAvailable,
+    /// 并行度超限
+    OverConcurrency,
 }
 
 /// 节点 Trait - 网关路由图中的节点接口
-pub trait Node: Send + Sync + Any {
+pub trait Node: Send + Sync {
     /// 获取节点名称
     fn name(&self) -> &str;
     /// 执行路由逻辑，返回路由结果
@@ -128,8 +142,6 @@ pub trait Node: Send + Sync + Any {
     fn health(&self) -> Option<&Arc<HealthMonitor>> {
         None
     }
-    /// 将节点转换为 Any 以便进行 downcast
-    fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
 }
 
 /// 节点守卫 trait
@@ -142,20 +154,11 @@ pub trait NodeGuard: Send + Sync {
 }
 
 /// 简单守卫，用于包装不需要特殊清理的节点
-pub struct SimpleGuard {
-    node: Arc<dyn Node>,
-}
+pub struct SimpleGuard<T>(T);
 
-impl SimpleGuard {
-    /// 创建一个新的 SimpleGuard
-    pub fn new(node: Arc<dyn Node>) -> Self {
-        Self { node }
-    }
-}
-
-impl NodeGuard for SimpleGuard {
+impl<T: Node> NodeGuard for SimpleGuard<T> {
     fn node(&self) -> &dyn Node {
-        self.node.as_ref()
+        &self.0
     }
 }
 
@@ -164,6 +167,9 @@ impl NodeGuard for SimpleGuard {
 /// 从配置文件中读取节点定义，创建节点实例并建立节点间的连接关系
 pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
     use llm_gateway_config::Node as ConfigNode;
+    use log::info;
+
+    info!("Building node graph with {} nodes...", config.nodes.len());
 
     /// 占位节点，用于在连接建立前保存节点名称引用
     struct PlaceHolder(String);
@@ -171,9 +177,6 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
     impl Node for PlaceHolder {
         fn name(&self) -> &str {
             &self.0
-        }
-        fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
-            self
         }
         fn route(&self, _: &RoutePayload) -> RouteResult {
             unimplemented!()
@@ -187,73 +190,61 @@ pub fn build(config: &GatewayConfig) -> Vec<Arc<InputNode>> {
     let health_config = config
         .health
         .as_ref()
-        .map(|h| h.to_internal())
-        .unwrap_or_else(|| llm_gateway_config::HealthConfig::default().to_internal());
+        .map(HealthConfig::to_internal)
+        .unwrap_or_else(|| HealthConfig::default().to_internal());
 
     let mut ans = Vec::new();
     let mut nodes: HashMap<&str, Arc<dyn Node>> = HashMap::new();
     // 存储需要设置后继的 ConcurrencyNode: (节点名称, 后继名称)
-    let mut concurrency_successors: Vec<(&str, String)> = Vec::new();
     for (name, node) in &config.nodes {
         match node {
-            ConfigNode::Input(n) => ans.push(Arc::new(InputNode {
-                name: name.to_string(),
-                port: n.port,
-                models: RwLock::new(
-                    n.models
-                        .iter()
-                        .map(|model_name| {
-                            let name_string = model_name.clone();
-                            (name_string, Arc::new(PlaceHolder(model_name.clone())) as _)
-                        })
-                        .collect(),
-                ),
-                alias: n.alias.clone(),
-            })),
+            ConfigNode::Input(n) => {
+                let models: HashMap<String, Arc<dyn Node>> = n
+                    .models
+                    .iter()
+                    .map(|model_name| {
+                        (
+                            model_name.clone(),
+                            Arc::new(PlaceHolder(model_name.clone())) as _,
+                        )
+                    })
+                    .collect();
+                ans.push(Arc::new(InputNode::new(
+                    name.clone(),
+                    n.port,
+                    models,
+                    n.alias.clone(),
+                )))
+            }
             ConfigNode::Virtual(n) => match n {
                 VirtualNode::Sequence(successors) => {
+                    let successors: Vec<Arc<dyn Node>> = successors
+                        .iter()
+                        .map(|name| Arc::new(PlaceHolder(name.clone())) as _)
+                        .collect();
                     nodes.insert(
                         &**name,
-                        Arc::new(SequenceNode {
-                            name: name.to_string(),
-                            successors: RwLock::new(
-                                successors
-                                    .iter()
-                                    .map(|name| Arc::new(PlaceHolder(name.clone())) as _)
-                                    .collect(),
-                            ),
-                        }) as _,
+                        Arc::new(SequenceNode::new(name.clone(), successors)) as _,
                     );
                 }
                 VirtualNode::Concurrency { max, successor } => {
-                    let node = Arc::new(ConcurrencyNode::new(name.to_string(), *max));
-                    concurrency_successors.push((name, successor.clone()));
-                    nodes.insert(&**name, node.clone() as _);
+                    let successor = PlaceHolder(successor.clone());
+                    let node = ConcurrencyNode::new(name.clone(), *max, Arc::new(successor));
+                    nodes.insert(&**name, Arc::new(node) as _);
                 }
             },
             ConfigNode::Backend(n) => {
                 // 为后端节点创建健康监控器
-                let health_monitor = Arc::new(HealthMonitor::new(health_config.clone()));
                 nodes.insert(
                     &**name,
-                    Arc::new(BackendNode {
-                        name: name.to_string(),
-                        base_url: n.base_url.clone(),
-                        api_key: n.api_key.clone(),
-                        health: health_monitor,
-                    }) as _,
+                    Arc::new(BackendNode::new(
+                        name.clone(),
+                        n.base_url.clone(),
+                        n.api_key.clone(),
+                        Arc::new(HealthMonitor::new(health_config.clone())),
+                    )) as _,
                 );
             }
-        }
-    }
-
-    // 设置 ConcurrencyNode 的后继节点
-    for (node_name, successor_name) in concurrency_successors {
-        if let Some(node) = nodes.get(node_name)
-            && let Ok(concurrency_node) = node.clone().into_any().downcast::<ConcurrencyNode>()
-            && let Some(successor) = nodes.get(successor_name.as_str())
-        {
-            concurrency_node.set_successor(successor.clone());
         }
     }
 

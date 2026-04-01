@@ -10,6 +10,10 @@ pub enum GatewayError {
     #[error("Unknown protocol")]
     UnknownProtocol,
 
+    /// 缺少模型字段
+    #[error("Missing model field")]
+    MissingModelField,
+
     /// 模型未找到
     #[error("Model not found: {0}")]
     ModelNotFound(String),

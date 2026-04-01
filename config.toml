@@ -1,8 +1,6 @@
-﻿# 表示这是一个输入节点
+﻿# 输入节点（输入节点的后继是模型节点，根据协议中的 `model` 字段路由到指定名字的后继）
 [input.service]
-# 输入节点将打开一个指定的端口
-port = 9000
-# 输入节点的后继是模型节点，根据协议中的 `model` 字段路由到指定名字的后继
+port = 8000
 models = ["qwen3.5-35b-a3b", "qwen3.5-122b-a10b"]
 
 [input.service.alias]
@@ -10,24 +8,36 @@ models = ["qwen3.5-35b-a3b", "qwen3.5-122b-a10b"]
 "Qwen3.5-35B-A3B" = "qwen3.5-35b-a3b"
 "Qwen3.5-122B-A10B" = "qwen3.5-122b-a10b"
 
-# 这是一个虚节点
+# 输入节点
+[input.test]
+port = 8001
+models = ["qwen3.5-35b-a3b", "qwen3.5-122b-a10b", "qwen3.5-35b-a3b-no-mtp"]
+
+# 模型节点，顺序尝试路由
 [node."qwen3.5-35b-a3b"]
-# 虚节点路由策略是顺序尝试，尝试的顺序如下
-sequence = ["sglang-qwen3.5-35b-a3b", "aliyun"]
+sequence = ["limit-sglang-qwen-35b", "aliyun"]
 
-# 这是一个虚节点
+# 模型节点，顺序尝试路由
 [node."qwen3.5-122b-a10b"]
-# 虚节点路由策略是顺序尝试，尝试的顺序如下
-sequence = ["sglang-qwen3.5-122b-a10b", "aliyun"]
+sequence = ["limit-sglang-qwen-122b", "aliyun"]
 
-# 这是一些简单后端节点，它们只指定了 base-url，直接转发所有协议，不进行协议转换
+# 限流节点
+[node.limit-sglang-qwen-35b]
+concurrency = { max = 8, successor = "sglang-qwen3.5-35b-a3b" }
+
+# 限流节点
+[node.limit-sglang-qwen-122b]
+concurrency = { max = 8, successor = "sglang-qwen3.5-122b-a10b" }
+
+# 简单后端节点，它们只指定了 base-url，直接转发所有协议，不进行协议转换
 [backend]
 "sglang-qwen3.5-35b-a3b" = "http://172.17.250.163:30001"
 "sglang-qwen3.5-122b-a10b" = "http://172.17.250.163:30002"
+"qwen3.5-35b-a3b-no-mtp" = "http://172.17.250.163:30003"
 
-# 这是一个后端节点
+# 后端节点
 [backend.aliyun]
-# 它指定了特定协议的 base-url，非此协议的负载需要进行协议转换
+# 指定了特定协议的 base-url，非此协议的负载需要进行协议转换
 base-url = { anthropic = "https://dashscope.aliyuncs.com/apps/anthropic" }
 # 通过这个节点访问后端时会替换负载中的 api-key
 api-key = "$ALIYUN_API_KEY"
@@ -62,7 +72,7 @@ aggregate-limit = 256
 # 管理 API 配置
 # ============================================
 [admin]
-# 管理 API 监听端口（默认 8080）
+# 管理 API 监听端口（0 或省略表示随机端口）
 port = 8080
 # 认证 Token（可选），如果设置则请求需要 Authorization: Bearer <token> 头
 # auth-token = "your-secret-token"

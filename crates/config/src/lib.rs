@@ -59,14 +59,14 @@ pub use error::Error as ConfigParseError;
 pub use health::{HealthConfig, InternalHealthConfig};
 pub use input::InputNode;
 pub use node::{Node, VirtualNode};
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{collections::HashMap, str::FromStr};
 
 /// 网关配置根结构
 ///
 /// 包含所有节点的映射，节点名称作为 key
 #[derive(Clone, Debug)]
 pub struct GatewayConfig {
-    pub nodes: HashMap<Arc<str>, Node>,
+    pub nodes: HashMap<String, Node>,
     pub statistics: Option<llm_gateway_statistics::StatisticsConfig>,
     pub health: Option<HealthConfig>,
     pub admin: Option<AdminConfig>,
@@ -105,7 +105,7 @@ impl FromStr for GatewayConfig {
         // 解析管理配置 [admin]
         let admin = parse_admin_config(root_table);
 
-        let mut nodes: HashMap<Arc<str>, Node> = HashMap::new();
+        let mut nodes: HashMap<_, _> = HashMap::new();
 
         // 解析输入节点 [input.*]
         // 输入节点定义网关入口，包含 port 和 models 字段
@@ -144,7 +144,7 @@ impl FromStr for GatewayConfig {
                     for model in &models {
                         if !model_set.insert(model.as_str()) {
                             return Err(ConfigParseError::DuplicateName(format!(
-                                "input.{name}.models 中重复的模型名：{model}"
+                                "input.{name}.models has duplicate model name: {model}"
                             )));
                         }
                     }
@@ -165,7 +165,7 @@ impl FromStr for GatewayConfig {
                     for alias_key in alias.keys() {
                         if model_set.contains(alias_key.as_str()) {
                             return Err(ConfigParseError::DuplicateName(format!(
-                                "input.{name}.alias 中的别名 '{alias_key}' 与 models 中的模型名重复"
+                                "input.{name}.alias has alias '{alias_key}' that duplicates a model name in models"
                             )));
                         }
                     }
@@ -174,13 +174,13 @@ impl FromStr for GatewayConfig {
                     for (alias_key, target_model) in &alias {
                         if !model_set.contains(target_model.as_str()) {
                             return Err(ConfigParseError::ParseError(format!(
-                                "input.{name}.alias 中的别名 '{alias_key}' 映射到不存在的模型 '{target_model}'"
+                                "input.{name}.alias has alias '{alias_key}' mapping to non-existent model '{target_model}'"
                             )));
                         }
                     }
 
                     nodes.insert(
-                        name.clone().into(),
+                        name.clone(),
                         Node::Input(InputNode {
                             port,
                             models,
@@ -208,10 +208,7 @@ impl FromStr for GatewayConfig {
                             .filter_map(|v| v.as_str().map(String::from))
                             .collect();
 
-                        nodes.insert(
-                            name.clone().into(),
-                            Node::Virtual(VirtualNode::Sequence(seq)),
-                        );
+                        nodes.insert(name.clone(), Node::Virtual(VirtualNode::Sequence(seq)));
                     }
                     // 解析 concurrency 配置
                     else if let Some(concurrency_config) = node_config.get("concurrency") {
@@ -247,7 +244,7 @@ impl FromStr for GatewayConfig {
                             })?;
 
                         nodes.insert(
-                            name.clone().into(),
+                            name.clone(),
                             Node::Virtual(VirtualNode::Concurrency { max, successor }),
                         );
                     } else {
@@ -275,7 +272,7 @@ impl FromStr for GatewayConfig {
                     let base_url = BaseUrl::AllInOne(url_str.into());
 
                     nodes.insert(
-                        name.clone().into(),
+                        name.clone(),
                         Node::Backend(BackendNode {
                             base_url,
                             api_key: None,
@@ -319,7 +316,7 @@ impl FromStr for GatewayConfig {
                         .map(String::from);
 
                     nodes.insert(
-                        name.clone().into(),
+                        name.clone(),
                         Node::Backend(BackendNode { base_url, api_key }),
                     );
                 }
@@ -352,13 +349,15 @@ fn parse_statistics_config(
 
 /// 解析管理配置
 fn parse_admin_config(root_table: &toml::Table) -> Option<AdminConfig> {
-    root_table
-        .get("admin")
-        .and_then(|v| v.as_table())
-        .and_then(|table| {
-            let toml_str = toml::to_string(table).ok()?;
-            toml::from_str(&toml_str).ok()
-        })
+    root_table.get("admin").map(|v| {
+        // 如果 [admin] 存在但为空，使用默认配置（随机端口）
+        v.as_table()
+            .and_then(|table| {
+                let toml_str = toml::to_string(table).ok()?;
+                toml::from_str(&toml_str).ok()
+            })
+            .unwrap_or_default()
+    })
 }
 
 #[cfg(test)]
@@ -687,5 +686,139 @@ api-key = "$ALIYUN_API_KEY"
         assert!(config.nodes.contains_key("sglang-35b"));
         assert!(config.nodes.contains_key("sglang-72b"));
         assert!(config.nodes.contains_key("aliyun"));
+    }
+
+    /// 测试项目根目录的 config.toml 配置文件能否正确解析
+    #[test]
+    fn test_parse_project_config_file() {
+        use std::path::PathBuf;
+
+        // 项目根目录的 config.toml 路径
+        let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("config.toml");
+
+        println!("Loading config from: {:?}", config_path);
+
+        // 读取文件内容
+        let content = std::fs::read_to_string(&config_path).expect("Failed to read config.toml");
+
+        // 解析配置
+        let config = GatewayConfig::from_str(&content).expect("Failed to parse config.toml");
+
+        // 验证输入节点
+        assert!(config.nodes.contains_key("service"));
+        assert!(config.nodes.contains_key("test"));
+
+        // 验证限流节点 (concurrency)
+        assert!(config.nodes.contains_key("limit-sglang-qwen-35b"));
+        assert!(config.nodes.contains_key("limit-sglang-qwen-122b"));
+
+        match config.nodes.get("limit-sglang-qwen-35b").unwrap() {
+            Node::Virtual(virtual_node) => {
+                assert_eq!(virtual_node.concurrency(), Some(8));
+                assert_eq!(virtual_node.sequence(), &["sglang-qwen3.5-35b-a3b"]);
+            }
+            _ => panic!("Expected Virtual node for limit-sglang-qwen-35b"),
+        }
+
+        match config.nodes.get("limit-sglang-qwen-122b").unwrap() {
+            Node::Virtual(virtual_node) => {
+                assert_eq!(virtual_node.concurrency(), Some(8));
+                assert_eq!(virtual_node.sequence(), &["sglang-qwen3.5-122b-a10b"]);
+            }
+            _ => panic!("Expected Virtual node for limit-sglang-qwen-122b"),
+        }
+
+        // 验证模型路由节点 (sequence)
+        match config.nodes.get("qwen3.5-35b-a3b").unwrap() {
+            Node::Virtual(virtual_node) => {
+                assert_eq!(
+                    virtual_node.sequence(),
+                    &["limit-sglang-qwen-35b", "aliyun"]
+                );
+            }
+            _ => panic!("Expected Virtual node"),
+        }
+
+        match config.nodes.get("qwen3.5-122b-a10b").unwrap() {
+            Node::Virtual(virtual_node) => {
+                assert_eq!(
+                    virtual_node.sequence(),
+                    &["limit-sglang-qwen-122b", "aliyun"]
+                );
+            }
+            _ => panic!("Expected Virtual node"),
+        }
+
+        // 验证后端节点
+        assert!(config.nodes.contains_key("sglang-qwen3.5-35b-a3b"));
+        assert!(config.nodes.contains_key("sglang-qwen3.5-122b-a10b"));
+        assert!(config.nodes.contains_key("qwen3.5-35b-a3b-no-mtp"));
+        assert!(config.nodes.contains_key("aliyun"));
+
+        // 验证 admin 配置（端口设置为 8080）
+        assert!(config.admin.is_some(), "Admin config should be enabled");
+        let admin = config.admin.as_ref().unwrap();
+        assert_eq!(admin.port, 8080, "Admin port should be 8080");
+        assert!(admin.auth_token.is_none());
+
+        println!("Config validation passed!");
+    }
+
+    /// 测试 [admin] 配置解析 - 空配置应使用默认随机端口
+    #[test]
+    fn test_admin_config_empty_uses_default() {
+        let toml_str = r#"
+[input.service]
+port = 8000
+models = ["test-model"]
+
+[admin]
+"#;
+        let config = GatewayConfig::from_str(toml_str).expect("Failed to parse config");
+
+        // [admin] 存在，应该启用 admin 服务
+        assert!(config.admin.is_some());
+        let admin = config.admin.unwrap();
+        // 默认端口为 0（随机端口）
+        assert_eq!(admin.port, 0);
+        assert!(admin.auth_token.is_none());
+    }
+
+    /// 测试 [admin] 配置解析 - 显式设置端口
+    #[test]
+    fn test_admin_config_with_port() {
+        let toml_str = r#"
+[input.service]
+port = 8000
+models = ["test-model"]
+
+[admin]
+port = 9090
+auth-token = "secret123"
+"#;
+        let config = GatewayConfig::from_str(toml_str).expect("Failed to parse config");
+
+        assert!(config.admin.is_some());
+        let admin = config.admin.unwrap();
+        assert_eq!(admin.port, 9090);
+        assert_eq!(admin.auth_token, Some("secret123".to_string()));
+    }
+
+    /// 测试 [admin] 不存在时返回 None
+    #[test]
+    fn test_admin_config_missing() {
+        let toml_str = r#"
+[input.service]
+port = 8000
+models = ["test-model"]
+"#;
+        let config = GatewayConfig::from_str(toml_str).expect("Failed to parse config");
+
+        assert!(config.admin.is_none());
     }
 }
